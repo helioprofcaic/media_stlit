@@ -6,6 +6,7 @@ import importlib.util
 import xml.etree.ElementTree as ET
 import urllib.parse
 import google_storage
+import socket
 
 # Adiciona o diretório atual ao path para importar os módulos core
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -204,7 +205,33 @@ def go_back():
 
 # --- Interface ---
 
-st.title("📺 Media Player Web")
+# Layout do Cabeçalho (Navbar) com QR Code
+col_header_1, col_header_2 = st.columns([6, 1])
+
+with col_header_1:
+    st.title("📺 Media Player Web")
+
+with col_header_2:
+    # --- Lógica para obter a URL correta (Cloud vs. Local) ---
+    # 1. Tenta obter a URL pública configurada nos secrets (para deploy na nuvem)
+    app_url = st.secrets.get("media_player_drive", {}).get("public_url")
+
+    # 2. Se não houver URL pública, tenta descobrir o IP local (para uso em rede Wi-Fi)
+    if not app_url:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            local_ip = s.getsockname()[0]
+            s.close()
+            app_url = f"http://{local_ip}:8501"
+        except:
+            app_url = "http://localhost:8501" # Fallback final
+
+    with st.popover("📱 Acessar"):
+        st.caption("Escaneie para controlar pelo celular:")
+        qr_code_url = f"https://api.qrserver.com/v1/create-qr-code/?size=150x150&data={urllib.parse.quote(app_url)}"
+        st.image(qr_code_url, width=150)
+        st.code(app_url, language="text")
 
 # Sidebar: Lista de Plugins Instalados
 with st.sidebar:

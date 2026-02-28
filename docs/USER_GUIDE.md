@@ -46,6 +46,20 @@ Para que o player possa acessar seus vídeos e músicas no Google Drive, são ne
 
 Após esses passos, o botão "Testar Acesso ao Drive" na barra lateral deve confirmar a conexão.
 
+### Deploy na Nuvem (Streamlit Cloud)
+
+Quando o player está rodando na nuvem, o QR Code para acesso via celular precisa apontar para a URL pública do aplicativo (ex: `https://seu-app.streamlit.app`).
+
+Para configurar isso, adicione a URL pública no seu arquivo `secrets.toml`:
+
+```toml
+[media_player_drive]
+folder_id = "ID_DA_SUA_PASTA"
+public_url = "https://seu-app.streamlit.app" # URL pública do seu app
+```
+
+Se a `public_url` não for definida, o sistema tentará detectar o IP local, o que é ideal para uso em uma rede Wi-Fi doméstica, mas não funcionará na nuvem.
+
 ### Navegação
 *   **Pastas**: Clique nos botões da lista para entrar em pastas.
 *   **Breadcrumbs**: No topo, você vê o caminho atual (ex: `Home > Filmes > Ação`). Use o botão **⬅️ Voltar** para subir um nível.
