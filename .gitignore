@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Ambientes Virtuais
+venv/
+env/
+.env
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Dados Locais e Logs (Gerados em tempo de execução)
+data/
+*.log
+
+# Configurações de IDE
+.vscode/
+.idea/
+
+# Sistema Operacional
+.DS_Store
+Thumbs.db
+
+# Credenciais Google (caso estejam na raiz)
+*.json
+!google_storage.py
+!memory.json
