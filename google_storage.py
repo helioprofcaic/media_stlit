@@ -37,9 +37,9 @@ def get_drive_service():
         return None
 
 def get_folder_id():
-    """Retorna o ID da pasta configurado."""
-    if "drive" in st.secrets and "folder_id" in st.secrets["drive"]:
-        return st.secrets["drive"]["folder_id"]
+    """Retorna o ID da pasta do player configurado nos secrets."""
+    if "media_player_drive" in st.secrets and "folder_id" in st.secrets["media_player_drive"]:
+        return st.secrets["media_player_drive"]["folder_id"]
     return None
 
 def get_or_create_subfolder(service, parent_id, folder_name):

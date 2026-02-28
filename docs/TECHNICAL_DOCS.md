@@ -72,7 +72,7 @@ private_key = "..."
 client_email = "..."
 ...
 
-[drive]
+[media_player_drive]
 folder_id = "ID_DA_PASTA_RAIZ"
 ```
 **Nota:** Vídeos no Drive devem ter permissão de leitura para o e-mail da Service Account ou estarem públicos (link compartilhável) para o streaming funcionar via URL direta.

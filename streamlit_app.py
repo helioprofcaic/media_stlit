@@ -100,6 +100,44 @@ def install_dependencies(plugin_path):
 def navigate_to(url, label="Home"):
     """Executa o plugin e atualiza o estado com os novos itens."""
     
+    # --- Suporte a Google Drive (Navegação de Pastas) ---
+    if url.startswith("gdrive_folder://"):
+        folder_id = url.replace("gdrive_folder://", "")
+        if folder_id == "root":
+            folder_id = None # Usa o ID configurado no secrets
+            
+        with st.spinner("Listando arquivos do Drive..."):
+            files = google_storage.list_files_with_link(folder_id)
+            
+            drive_items = []
+            if files:
+                for f in files:
+                    mime = f.get('mimeType', '')
+                    # Pastas
+                    if mime == 'application/vnd.google-apps.folder':
+                        drive_items.append({
+                            'label': f.get('name'),
+                            'url': f"gdrive_folder://{f.get('id')}",
+                            'isFolder': True,
+                            'art': {'icon': 'https://upload.wikimedia.org/wikipedia/commons/thumb/4/42/Folder-icon-yellow.svg/1024px-Folder-icon-yellow.svg.png'}
+                        })
+                    # Arquivos de Mídia
+                    elif 'video' in mime or 'audio' in mime:
+                        drive_items.append({
+                            'label': f.get('name'),
+                            'url': f"gdrive://{f.get('id')}",
+                            'isFolder': False,
+                            'art': {'thumb': f.get('thumbnailLink')}
+                        })
+                
+                # Ordena: Pastas primeiro, depois nome
+                drive_items.sort(key=lambda x: (not x['isFolder'], x['label'].lower()))
+            
+            st.session_state.current_items = drive_items
+            st.session_state.current_url = url
+            st.session_state.video_url = None
+        return
+
     # --- Suporte a Google Drive ---
     if url.startswith("gdrive://"):
         file_id = url.replace("gdrive://", "")
@@ -192,30 +230,11 @@ with st.sidebar:
 
     elif source_mode == "Google Drive":
         if st.button("📂 Carregar Drive"):
-            with st.spinner("Conectando ao Google Drive..."):
-                files = google_storage.list_files_with_link()
-                
-                if not files:
-                    st.error("Nenhum arquivo encontrado ou erro de conexão.")
-                else:
-                    drive_items = []
-                    for f in files:
-                        # Filtra apenas áudio e vídeo
-                        mime = f.get('mimeType', '')
-                        if 'video' in mime or 'audio' in mime:
-                            drive_items.append({
-                                'label': f.get('name'),
-                                'url': f"gdrive://{f.get('id')}",
-                                'isFolder': False,
-                                'art': {'thumb': f.get('thumbnailLink')}
-                            })
-                    
-                    st.session_state.current_items = drive_items
-                    st.session_state.history = [("gdrive_root", "Google Drive")]
-                    st.session_state.current_url = "gdrive_root"
-                    st.session_state.preview_media = None
-                    st.session_state.video_url = None
-                    st.rerun()
+            # Inicia navegação pela raiz
+            start_url = "gdrive_folder://root"
+            st.session_state.history = [(start_url, "Google Drive")]
+            navigate_to(start_url, "Google Drive")
+            st.rerun()
         
     elif source_mode == "Arquivos Locais":
         st.info("Navegue pelos arquivos e pastas do computador onde o servidor está rodando.")
@@ -235,8 +254,14 @@ with st.sidebar:
             uploaded_file = st.file_uploader("Enviar Mídia", type=['mp4', 'mkv', 'avi', 'mp3', 'wav'])
             if uploaded_file is not None:
                 if st.button("Confirmar Upload"):
+                    # Determina a pasta de destino baseada na navegação atual
+                    target_folder = None
+                    if st.session_state.current_url and st.session_state.current_url.startswith("gdrive_folder://"):
+                        target_folder = st.session_state.current_url.replace("gdrive_folder://", "")
+                        if target_folder == "root": target_folder = None
+
                     with st.spinner("Enviando para o Google Drive..."):
-                        fid = google_storage.upload_file(uploaded_file, uploaded_file.name)
+                        fid = google_storage.upload_file(uploaded_file, uploaded_file.name, folder_id=target_folder)
                         if fid:
                             st.success("Upload concluído com sucesso!")
                         else:
