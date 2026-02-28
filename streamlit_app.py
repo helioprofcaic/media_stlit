@@ -207,6 +207,54 @@ def go_back():
         st.session_state.current_url = None
     st.session_state.preview_media = None
 
+def sync_drive_plugins():
+    """Encontra e baixa as pastas de plugins do Google Drive."""
+    with st.spinner("Conectando ao Google Drive..."):
+        service = google_storage.get_drive_service()
+        root_id = google_storage.get_folder_id()
+        if not service or not root_id:
+            st.error("Falha na conexão com o Google Drive. Verifique as configurações.")
+            return
+
+    total_downloaded = 0
+    
+    # 1. Sincronizar pasta 'plugin'
+    with st.spinner("Procurando pasta 'plugin' no Drive..."):
+        plugin_folder_id = google_storage.find_folder_id(service, root_id, 'plugin')
+    
+    if plugin_folder_id:
+        with st.spinner("Sincronizando plugins de desenvolvimento..."):
+            if not os.path.exists(PLUGINS_REPO_DIR):
+                os.makedirs(PLUGINS_REPO_DIR)
+            count = google_storage.download_folder_recursively(service, plugin_folder_id, PLUGINS_REPO_DIR)
+            total_downloaded += count
+            st.toast(f"{count} itens sincronizados da pasta 'plugin'.")
+    else:
+        st.info("Pasta 'plugin' não encontrada na raiz do Drive.")
+
+    # 2. Sincronizar pasta 'data/addons'
+    with st.spinner("Procurando pasta 'data' no Drive..."):
+        data_folder_id = google_storage.find_folder_id(service, root_id, 'data')
+        addons_folder_id = None
+        if data_folder_id:
+            with st.spinner("Procurando pasta 'addons' dentro de 'data'..."):
+                addons_folder_id = google_storage.find_folder_id(service, data_folder_id, 'addons')
+
+    if addons_folder_id:
+        with st.spinner("Sincronizando addons instalados..."):
+            if not os.path.exists(ADDONS_DIR):
+                os.makedirs(ADDONS_DIR)
+            count = google_storage.download_folder_recursively(service, addons_folder_id, ADDONS_DIR)
+            total_downloaded += count
+            st.toast(f"{count} itens sincronizados de 'data/addons'.")
+    else:
+        st.info("Pasta 'data/addons' não encontrada no Drive.")
+
+    if total_downloaded > 0:
+        st.success("Sincronização concluída! Os plugins agora estão disponíveis na fonte 'Plugins Kodi'.")
+    else:
+        st.warning("Nenhuma pasta de plugin ('plugin' ou 'data/addons') encontrada para sincronizar.")
+
 # --- Interface ---
 
 # Layout do Cabeçalho (Navbar) com QR Code
@@ -290,6 +338,12 @@ with st.sidebar:
             st.session_state.history = [(start_url, "Google Drive")]
             navigate_to(start_url, "Google Drive")
             st.rerun()
+        
+        st.markdown("---")
+        with st.expander("⚙️ Sincronizar Plugins do Drive"):
+            st.info("Isso irá baixar os plugins das pastas 'plugin' e 'data/addons' do seu Drive para o player local.")
+            if st.button("Iniciar Sincronização"):
+                sync_drive_plugins()
         
     elif source_mode == "Arquivos Locais":
         st.info("Navegue pelos arquivos e pastas do computador onde o servidor está rodando.")

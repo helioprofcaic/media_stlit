@@ -58,6 +58,15 @@ Para que o player possa acessar seus vídeos e músicas no Google Drive, são ne
 
 Após esses passos, o botão "Testar Acesso ao Drive" na barra lateral deve confirmar a conexão.
 
+### Sincronizando Plugins do Google Drive
+
+Se você armazena seus plugins do Kodi nas pastas `plugin` ou `data/addons` dentro da sua pasta principal do Drive, você pode baixá-los para o player local.
+
+1.  Na barra lateral, selecione a fonte **Google Drive**.
+2.  Abra a seção **"⚙️ Sincronizar Plugins do Drive"**.
+3.  Clique em **"Iniciar Sincronização"**.
+4.  Após a conclusão, os plugins estarão disponíveis na fonte **Plugins Kodi**.
+
 ### Deploy na Nuvem (Streamlit Cloud)
 
 Quando o player está rodando na nuvem, o QR Code para acesso via celular precisa apontar para a URL pública do aplicativo (ex: `https://seu-app.streamlit.app`).

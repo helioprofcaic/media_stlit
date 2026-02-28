@@ -1,6 +1,7 @@
 import streamlit as st
 import json
 import io
+import os
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
@@ -72,6 +73,15 @@ def get_nested_folder_id(service, root_id, folder_path):
         current_id = get_or_create_subfolder(service, current_id, folder_name)
         if not current_id: return None
     return current_id
+
+def find_folder_id(service, parent_id, folder_name):
+    """Encontra o ID de uma subpasta pelo nome."""
+    query = f"mimeType = 'application/vnd.google-apps.folder' and name = '{folder_name}' and '{parent_id}' in parents and trashed = false"
+    results = service.files().list(q=query, fields="files(id)").execute()
+    files = results.get('files', [])
+    if files:
+        return files[0]['id']
+    return None
 
 def find_file(service, filename, folder_id):
     """Procura o ID de um arquivo pelo nome dentro da pasta alvo."""
@@ -280,3 +290,33 @@ def download_file_bytes(file_id):
         
     file_io.seek(0)
     return file_io
+
+def download_folder_recursively(service, folder_id, local_path):
+    """Baixa uma pasta do Drive e todo o seu conteúdo recursivamente."""
+    if not os.path.exists(local_path):
+        os.makedirs(local_path)
+
+    query = f"'{folder_id}' in parents and trashed = false"
+    results = service.files().list(q=query, fields="files(id, name, mimeType)").execute()
+    items = results.get('files', [])
+    
+    count = 0
+    for item in items:
+        item_name = item['name']
+        item_id = item['id']
+        item_path = os.path.join(local_path, item_name)
+        mime_type = item.get('mimeType', '')
+
+        if mime_type == 'application/vnd.google-apps.folder':
+            # É uma subpasta, chama recursivamente
+            count += download_folder_recursively(service, item_id, item_path)
+        else:
+            # É um arquivo, faz o download
+            request = service.files().get_media(fileId=item_id)
+            with io.FileIO(item_path, 'wb') as fh:
+                downloader = MediaIoBaseDownload(fh, request)
+                done = False
+                while done is False:
+                    status, done = downloader.next_chunk()
+        count += 1
+    return count
