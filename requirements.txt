@@ -1,8 +1,6 @@
 streamlit
-pandas
-fpdf2
-python-docx
-pypdf
-google-generativeai
+PyQt6
+requests
 google-api-python-client
-google-auth
+google-auth-httplib2
+google-auth-oauthlib

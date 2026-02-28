@@ -16,6 +16,10 @@ from core.utils import PLUGINS_REPO_DIR, ADDONS_DIR
 
 st.set_page_config(page_title="Streamlit Media Player", layout="wide")
 
+# --- Verificação de Configuração Essencial ---
+if not st.secrets:
+    st.warning("⚠️ **Atenção:** Arquivo `.streamlit/secrets.toml` não encontrado ou vazio. As funcionalidades do Google Drive estarão desativadas.")
+
 # --- Inicialização de Estado ---
 if 'history' not in st.session_state:
     st.session_state.history = []  # Pilha de navegação [(url, label)]
@@ -215,23 +219,47 @@ with col_header_2:
     # --- Lógica para obter a URL correta (Cloud vs. Local) ---
     # 1. Tenta obter a URL pública configurada nos secrets (para deploy na nuvem)
     app_url = st.secrets.get("media_player_drive", {}).get("public_url")
+    url_source = ""
 
-    # 2. Se não houver URL pública, tenta descobrir o IP local (para uso em rede Wi-Fi)
-    if not app_url:
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            local_ip = s.getsockname()[0]
-            s.close()
-            app_url = f"http://{local_ip}:8501"
-        except:
-            app_url = "http://localhost:8501" # Fallback final
+    if app_url:
+        url_source = "URL pública (secrets.toml)"
+    else:
+        # 2. Se não, tenta obter o IP local manual configurado nos secrets
+        local_ip_manual = st.secrets.get("media_player_drive", {}).get("local_ip")
+        if local_ip_manual:
+            app_url = f"http://{local_ip_manual}:8501"
+            url_source = "IP local manual (secrets.toml)"
+        else:
+            # 3. Se não houver URL pública nem IP manual, tenta descobrir o IP local (para uso em rede Wi-Fi)
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.connect(("8.8.8.8", 80))
+                local_ip = s.getsockname()[0]
+                s.close()
+                app_url = f"http://{local_ip}:8501"
+                url_source = "IP local (detecção automática)"
+            except:
+                app_url = "http://localhost:8501" # Fallback final
+                url_source = "localhost (fallback)"
+
+    # Imprime no console a URL que realmente está sendo usada (para debug)
+    print(f"🔗 URL DE ACESSO (QR CODE): {app_url} (Fonte: {url_source})")
 
     with st.popover("📱 Acessar"):
-        st.caption("Escaneie para controlar pelo celular:")
-        qr_code_url = f"https://api.qrserver.com/v1/create-qr-code/?size=150x150&data={urllib.parse.quote(app_url)}"
-        st.image(qr_code_url, width=150)
-        st.code(app_url, language="text")
+        st.markdown("### 📲 Conectar Celular")
+        
+        # Permite edição manual do IP na interface para correção imediata
+        current_host = app_url.split("://")[-1].split(":")[0]
+        manual_host = st.text_input("IP da Máquina:", value=current_host, help="Se o QR Code estiver errado, digite o IP correto aqui (ex: 192.168.0.15).")
+        
+        final_url = f"http://{manual_host}:8501"
+        
+        qr_code_url = f"https://api.qrserver.com/v1/create-qr-code/?size=200x200&data={urllib.parse.quote(final_url)}"
+        st.image(qr_code_url, width=200)
+        st.code(final_url, language="text")
+        
+        st.divider()
+        st.warning("🚫 **Não conecta?**\n\n1. Verifique se o celular está no **mesmo Wi-Fi**.\n2. O **Firewall do Windows** pode estar bloqueando. Tente desativá-lo temporariamente para testar.")
 
 # Sidebar: Lista de Plugins Instalados
 with st.sidebar:
@@ -367,6 +395,18 @@ if st.session_state.get('video_url'):
             url = clean_url
 
         st.video(url, autoplay=True)
+        
+        # Se for link do Google Drive, oferece opções de fallback (Iframe e Aviso de Permissão)
+        if "drive.google.com" in url:
+            with st.expander("🆘 O vídeo não toca? (Opções do Drive)", expanded=False):
+                st.info("1. Para o player acima funcionar, o arquivo deve estar como **'Qualquer pessoa com o link'**.")
+                st.info("2. Arquivos **MKV/AVI** não tocam no player padrão. Use o Player Nativo abaixo:")
+                
+                if "id=" in url:
+                    f_id = url.split("id=")[-1].split("&")[0]
+                    st.markdown(f"### 📽️ Player Nativo (Transcodificado)")
+                    iframe_html = f'<iframe src="https://drive.google.com/file/d/{f_id}/preview" width="100%" height="480" style="border:none; border-radius:10px;" allow="autoplay; fullscreen"></iframe>'
+                    st.markdown(iframe_html, unsafe_allow_html=True)
         
         if st.button("⏹️ Parar Reprodução", use_container_width=True):
             st.session_state.video_url = None

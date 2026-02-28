@@ -24,8 +24,8 @@ REM Instala/Atualiza dependencias
 echo Verificando dependencias...
 pip install -r requirements.txt
 
-REM Forca o modo local ignorando o secrets.toml
-set FORCE_LOCAL_MODE=1
+REM Nota: Para o Google Drive funcionar, o arquivo de segredos deve estar em .streamlit\secrets.toml
+REM Se aparecer um aviso no aplicativo, verifique a localização e o conteúdo deste arquivo.
 
 REM Executa a aplicacao
 echo Iniciando Media Player Web...

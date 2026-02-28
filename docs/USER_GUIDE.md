@@ -39,10 +39,22 @@ Para que o player possa acessar seus vídeos e músicas no Google Drive, são ne
 
 *   **Encontre o ID da pasta:** Abra a pasta no navegador. A URL será `.../folders/ID_DA_PASTA`. Copie esse ID.
 *   **Configure o `secrets.toml`:** Na raiz do projeto, crie ou edite o arquivo `.streamlit/secrets.toml` e adicione o ID:
+
+    A estrutura de pastas deve ser esta:
+    ```
+    Media-Player/
+    ├── .streamlit/
+    │   └── secrets.toml  <-- Arquivo com as senhas
+    ├── run.bat
+    └── ... (outros arquivos)
+    ```
+
     ```toml
     [media_player_drive]
     folder_id = "COLE_O_ID_DA_PASTA_AQUI"
     ```
+    
+    > **O que é `[media_player_drive]`?** É apenas um "título" ou "seção" dentro do arquivo `secrets.toml` para organizar as configurações específicas deste player, separando-as de outras que você possa ter.
 
 Após esses passos, o botão "Testar Acesso ao Drive" na barra lateral deve confirmar a conexão.
 
@@ -59,6 +71,16 @@ public_url = "https://seu-app.streamlit.app" # URL pública do seu app
 ```
 
 Se a `public_url` não for definida, o sistema tentará detectar o IP local, o que é ideal para uso em uma rede Wi-Fi doméstica, mas não funcionará na nuvem.
+
+**Problemas com o IP Local?**
+
+Se o QR Code gerar um endereço de IP que não funciona na sua rede local (comum em redes com VPN ou corporativas), você pode definir o IP manualmente no mesmo arquivo `secrets.toml`:
+
+```toml
+[media_player_drive]
+# ... outras configurações
+local_ip = "192.168.1.10" # Substitua pelo IP correto da sua máquina
+```
 
 ### Navegação
 *   **Pastas**: Clique nos botões da lista para entrar em pastas.

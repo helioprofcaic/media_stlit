@@ -241,8 +241,8 @@ def list_files_with_link(folder_id=None):
     if not target_id: return []
     
     query = f"'{target_id}' in parents and trashed = false"
-    # Busca ID, Nome, Tipo MIME e Link da Thumbnail
-    results = service.files().list(q=query, fields="files(id, name, mimeType, thumbnailLink)").execute()
+    # Busca ID, Nome, Tipo MIME, Link da Thumbnail e WebContentLink
+    results = service.files().list(q=query, fields="files(id, name, mimeType, thumbnailLink, webContentLink)").execute()
     return results.get('files', [])
 
 def upload_file(file_obj, filename, folder_id=None):
