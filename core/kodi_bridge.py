@@ -855,7 +855,7 @@ class MockXBMCAddon:
             id_lower = id.lower()
             
             if 'timeout' in id_lower:
-                return "60"
+                return "10" # Reduzido de 60 para 10 para falhar mais rápido
             
             if any(x in id_lower for x in ['cache', 'buffer']):
                 return "100"
@@ -944,6 +944,7 @@ def run_plugin(plugin_path, param_string="", dialog_answers=None):
         # Patch global no requests para evitar bloqueios (User-Agent)
         if 'requests' in sys.modules:
             import requests
+            from requests.adapters import HTTPAdapter
             # Verifica se já foi patcheado para evitar duplicidade
             if not getattr(requests.Session, '_ua_patched', False):
                 _orig_init = requests.Session.__init__
@@ -951,6 +952,10 @@ def run_plugin(plugin_path, param_string="", dialog_answers=None):
                     _orig_init(self, *args, **kwargs)
                     # Define um User-Agent de navegador moderno
                     self.headers['User-Agent'] = MockXBMC.getUserAgent()
+                    # Reduz retries para evitar travamentos longos (padrão é 3)
+                    adapter = HTTPAdapter(max_retries=0)
+                    self.mount("http://", adapter)
+                    self.mount("https://", adapter)
                 
                 requests.Session.__init__ = _new_init
                 requests.Session._ua_patched = True

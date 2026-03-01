@@ -26,6 +26,8 @@ def navigate_to(url, label="Home", dialog_answers=None):
             # Usa a URL pendente (que gerou o dialog) se existir, caso contrário usa a atual
             resume_url = st.session_state.get('pending_action_url', st.session_state.current_url)
             if resume_url:
+                # Limpa o player visualmente enquanto processa a seleção para dar feedback
+                st.session_state.video_url = None
                 current_label = st.session_state.history[-1][1] if st.session_state.history else "Voltar"
                 navigate_to(resume_url, current_label, dialog_answers=[idx])
         except Exception as e:
