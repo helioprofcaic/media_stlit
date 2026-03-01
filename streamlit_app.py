@@ -37,6 +37,8 @@ if 'current_items' not in st.session_state:
     st.session_state.current_items = []
 if 'preview_media' not in st.session_state:
     st.session_state.preview_media = None # Armazena metadados antes do play
+if 'input_dialog' not in st.session_state:
+    st.session_state.input_dialog = None # Armazena estado do diálogo de texto
 
 # --- Funções Auxiliares ---
 
@@ -257,6 +259,13 @@ def navigate_to(url, label="Home", dialog_answers=None):
                     st.toast(f"Selecione: {result['dialog_heading']}")
                     return
 
+                if result.get("dialog_input"):
+                    # O plugin pediu input de texto
+                    st.session_state.input_dialog = result["dialog_input"]
+                    st.session_state.input_dialog_url = url # URL para retomar
+                    st.rerun()
+                    return
+
                 if result.get("resolved_url"):
                     # É um vídeo para tocar
                     # NÃO define video_url direto (evita autoplay). Define preview.
@@ -447,6 +456,24 @@ with col_header_2:
         
         st.divider()
         st.warning("🚫 **Não conecta?**\n\n1. Verifique se o celular está no **mesmo Wi-Fi**.\n2. O **Firewall do Windows** pode estar bloqueando. Tente desativá-lo temporariamente para testar.")
+
+# --- Diálogo de Input (Teclado Virtual) ---
+if st.session_state.input_dialog:
+    with st.container(border=True):
+        st.info(f"⌨️ {st.session_state.input_dialog['heading']}")
+        with st.form(key='input_form'):
+            user_text = st.text_input("Digite sua busca:", value=st.session_state.input_dialog['default'])
+            col_sub_1, col_sub_2 = st.columns([1, 5])
+            with col_sub_1:
+                submitted = st.form_submit_button("Enviar", type="primary", use_container_width=True)
+            
+            if submitted:
+                url = st.session_state.input_dialog_url
+                st.session_state.input_dialog = None
+                # Retoma a navegação passando a resposta do usuário
+                navigate_to(url, "Resultado da Busca", dialog_answers=[user_text])
+                st.rerun()
+    st.stop() # Para a renderização do resto da página até o usuário responder
 
 # Sidebar: Lista de Plugins Instalados
 with st.sidebar:

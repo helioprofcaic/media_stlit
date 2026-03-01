@@ -21,6 +21,12 @@ class DialogSelectError(Exception):
         self.heading = heading
         self.options = options
 
+class DialogInputError(Exception):
+    """Exceção lançada quando o plugin solicita texto do usuário."""
+    def __init__(self, heading, default):
+        self.heading = heading
+        self.default = default
+
 def get_bridge_data():
     if not hasattr(_local, 'data'):
         _local.data = {
@@ -358,7 +364,10 @@ class MockXBMCGUI:
 
         def input(self, heading, default="", type=1, option=0, password=False):
             print(f"[DIALOG INPUT] {heading}")
-            return default or "search term"
+            if hasattr(_local, 'dialog_answers') and _local.dialog_answers:
+                return _local.dialog_answers.pop(0)
+            # Interrompe para pedir input ao usuário
+            raise DialogInputError(heading, default)
             
     class DialogProgress:
         def create(self, heading, message=""): pass
@@ -1066,6 +1075,17 @@ def run_plugin(plugin_path, param_string="", dialog_answers=None):
                 "resolved_url": None,
                 "media_info": {},
                 "dialog_heading": e.heading
+            }
+        except DialogInputError as e:
+            print(f"[BRIDGE] Interrompido para input: {e.heading}")
+            return {
+                "items": [],
+                "resolved_url": None,
+                "media_info": {},
+                "dialog_input": {
+                    "heading": e.heading,
+                    "default": e.default
+                }
             }
         except Exception as e:
             print(f"Erro no Plugin: {e}")
