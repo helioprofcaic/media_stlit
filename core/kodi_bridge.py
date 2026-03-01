@@ -867,7 +867,7 @@ class MockXBMCAddon:
                 return "true"
             
             # Silencia warnings para configurações comuns de plugins BR
-            if any(x in id_lower for x in ['opt', 'extra', 'layout', 'pass', 'favoritos', 'epg', 'pais']):
+            if any(x in id_lower for x in ['opt', 'extra', 'layout', 'pass', 'favoritos', 'epg', 'pais', 'player', 'ffmpeg']):
                 return "0"
 
             # Retorna string vazia para campos de texto/credenciais para evitar "0"

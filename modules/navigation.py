@@ -23,10 +23,11 @@ def navigate_to(url, label="Home", dialog_answers=None):
     if url.startswith("resume:select:"):
         try:
             idx = int(url.split(":")[-1])
-            # Usa a URL atual (que gerou o dialog) para re-executar o plugin
-            if st.session_state.current_url:
+            # Usa a URL pendente (que gerou o dialog) se existir, caso contrário usa a atual
+            resume_url = st.session_state.get('pending_action_url', st.session_state.current_url)
+            if resume_url:
                 current_label = st.session_state.history[-1][1] if st.session_state.history else "Voltar"
-                navigate_to(st.session_state.current_url, current_label, dialog_answers=[idx])
+                navigate_to(resume_url, current_label, dialog_answers=[idx])
         except Exception as e:
             st.error(f"Erro ao processar seleção: {e}")
         return
@@ -146,6 +147,8 @@ def navigate_to(url, label="Home", dialog_answers=None):
                 if result.get("dialog_heading"):
                     # O plugin pediu uma seleção (ex: escolher servidor)
                     st.session_state.current_items = result["items"]
+                    # Salva a URL que causou o diálogo para ser retomada corretamente
+                    st.session_state.pending_action_url = url
                     # Não limpamos current_url para permitir o resume na mesma URL
                     st.session_state.video_url = None
                     return
@@ -162,11 +165,15 @@ def navigate_to(url, label="Home", dialog_answers=None):
                     # Define preview e inicia reprodução direta (Autoplay)
                     st.session_state.preview_media = result
                     st.session_state.video_url = result["resolved_url"]
+                    # Limpa pendência
+                    if 'pending_action_url' in st.session_state: del st.session_state.pending_action_url
                 else:
                     # É um diretório
                     st.session_state.current_items = result["items"]
                     st.session_state.current_url = url
                     st.session_state.video_url = None # Limpa vídeo anterior
+                    # Limpa pendência
+                    if 'pending_action_url' in st.session_state: del st.session_state.pending_action_url
             else:
                 # Tenta verificar se é um Repositório (que não tem main.py)
                 addon_xml = os.path.join(plugin_path, 'addon.xml')

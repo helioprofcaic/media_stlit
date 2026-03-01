@@ -14,7 +14,10 @@ O projeto utiliza uma arquitetura de **Mocking** (Simulação) para executar plu
 2.  **Streamlit App (`streamlit_app.py`)**:
     *   Frontend Web.
     *   Gerencia o estado da sessão (`st.session_state`) para histórico de navegação e itens atuais.
-    *   Usa `subprocess` para instalar dependências (`pip`) listadas no `addon.xml` em tempo de execução.
+    *   **Modularização**: A lógica foi dividida em módulos (`modules/`) para melhor organização:
+        *   `modules/navigation.py`: Gerencia navegação, execução de plugins e histórico.
+        *   `modules/drive_sync.py`: Sincronização com Google Drive e plugins locais.
+        *   `modules/utils.py`: Utilitários gerais e instalação de dependências.
 
 3.  **Desktop Player (`video_player.py`)**:
     *   Frontend Desktop usando PyQt6.
@@ -36,6 +39,10 @@ root/
 │   ├── addons/         # Onde os plugins são instalados
 │   └── player.log      # Logs de execução
 ├── docs/               # Documentação
+├── modules/            # Módulos do Streamlit App
+│   ├── drive_sync.py   # Sincronização
+│   ├── navigation.py   # Navegação e execução
+│   └── utils.py        # Utilitários
 ├── plugin/             # Pasta para desenvolvimento local de plugins
 ├── streamlit_app.py    # Entry point Web
 └── video_player.py     # Entry point Desktop
@@ -45,7 +52,7 @@ root/
 
 1.  O usuário seleciona um plugin na interface.
 2.  O sistema localiza o `main.py` ou `default.py` do plugin.
-3.  A função `run_plugin(path, params)` é chamada.
+3.  A função `run_plugin(path, params)` é chamada (agora via `modules.navigation`).
 4.  O **Bridge**:
     *   Bloqueia a thread (`_plugin_lock`) para evitar conflito de `sys.argv`.
     *   Limpa o `sys.modules` de execuções anteriores.
@@ -57,7 +64,7 @@ root/
 
 ## Dependências e Addons
 
-O sistema possui um resolvedor de dependências simples em `streamlit_app.py` -> `install_dependencies`.
+O sistema possui um resolvedor de dependências simples em `modules/utils.py` -> `install_dependencies`.
 Ele lê o arquivo `addon.xml`, mapeia nomes de pacotes do Kodi (ex: `script.module.requests`) para pacotes PyPI (`requests`) e os instala automaticamente.
 
 ## Google Drive Integration

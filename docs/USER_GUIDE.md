@@ -12,14 +12,25 @@ Para facilitar o uso, incluímos um arquivo `run.bat`.
 
 Ao acessar o endereço do player no navegador:
 
+### Página Inicial (Dashboard)
+A nova tela inicial oferece acesso rápido às principais funções:
+*   **🚀 Acesso Rápido**: Botões para Google Drive, Arquivos Locais e Sincronização.
+*   **🕒 Recentes**: Histórico dos últimos plugins ou pastas acessados.
+*   **🧩 Meus Plugins**: Grade com todos os plugins instalados para acesso direto.
+
 ### Barra Lateral (Menu)
-A barra lateral esquerda é o seu centro de controle.
+A barra lateral esquerda contém opções avançadas:
 1.  **Fonte de Mídia**: Escolha entre:
     *   **Plugins Kodi**: Lista os addons instalados no sistema.
     *   **Google Drive**: Conecta à sua conta do Google para listar vídeos.
     *   **Arquivos Locais**: Permite navegar pelas pastas do computador onde o player está rodando.
-2.  **Seletor**: Dependendo da fonte, selecione o Plugin desejado ou clique em "Carregar Drive".
-3.  **Botão Carregar**: Inicia a navegação na fonte escolhida.
+2.  **Botão Parar**: Um botão global para interromper a reprodução de áudio/vídeo em segundo plano.
+3.  **Carregar Plugin**: Permite selecionar e carregar plugins manualmente.
+
+### Acesso via Celular (QR Code)
+No topo da página, clique no botão **"📱 Acessar"** para ver o QR Code.
+*   **Abas de Rede**: Escolha entre **☁️ Público** (se configurado) ou **🏠 Local** (Wi-Fi).
+*   **Seleção de IP**: Se seu computador tiver vários IPs, você pode escolher qual usar.
 
 ### Configurando o Acesso ao Google Drive
 
@@ -97,10 +108,14 @@ local_ip = "192.168.1.10" # Substitua pelo IP correto da sua máquina
 
 ### Reprodução
 Quando você seleciona um vídeo:
-1.  Uma tela de **Pré-visualização** aparecerá com detalhes (Título, Artista, Ícone).
-2.  Clique em **▶️ INICIAR REPRODUÇÃO**.
-3.  O vídeo começará automaticamente.
-4.  **QR Code**: Abra a seção "📱 Assistir no Celular" e escaneie o código para abrir o vídeo no seu smartphone.
+1.  **Player de Stream**: Para plugins e IPTV. Tenta resolver headers e redirecionamentos automaticamente.
+    *   Se o vídeo não tocar, verifique a seção **"📺 Player Externo"** para copiar o link e usar no VLC.
+2.  **Player de Arquivo**: Para Google Drive e arquivos locais.
+3.  **Controles**: Botões para parar a reprodução e QR Code específico para o vídeo.
+
+### Solução de Problemas na Interface
+*   **Mensagens de Erro**: Erros de plugins agora aparecem em caixas vermelhas no topo da lista, facilitando o diagnóstico.
+*   **Conteúdo Misto**: Se um canal de TV não tocar, verifique se há um aviso de "Conteúdo Misto" (HTTP em HTTPS).
 
 ---
 
