@@ -5,6 +5,9 @@ import xml.etree.ElementTree as ET
 import shutil
 import json
 import threading
+import re
+import warnings
+from core.utils import ADDONS_DIR, DATA_DIR, PLUGINS_REPO_DIR
 
 # Armazenamento local para thread (suporte a multiusuário no Streamlit)
 _local = threading.local()
@@ -12,15 +15,28 @@ _local = threading.local()
 # Lock global para garantir execução atômica de plugins (protege sys.argv e sys.modules)
 _plugin_lock = threading.Lock()
 
+class DialogSelectError(Exception):
+    """Exceção lançada quando o plugin solicita uma seleção do usuário."""
+    def __init__(self, heading, options):
+        self.heading = heading
+        self.options = options
+
 def get_bridge_data():
     if not hasattr(_local, 'data'):
         _local.data = {
             "items": [],
             "resolved_url": None,
             "drm_info": None,
-            "media_info": None
+            "media_info": {}
         }
+    if _local.data.get("media_info") is None:
+        _local.data["media_info"] = {}
     return _local.data
+
+def get_window_props():
+    if not hasattr(_local, 'window_props'):
+        _local.window_props = {}
+    return _local.window_props
 
 # Callback global para atualizações de metadados em tempo real
 _metadata_callback = None
@@ -28,6 +44,11 @@ _metadata_callback = None
 def register_metadata_callback(callback):
     global _metadata_callback
     _metadata_callback = callback
+
+def get_playlists():
+    if not hasattr(_local, 'playlists'):
+        _local.playlists = {0: [], 1: []} # 0: Music, 1: Video
+    return _local.playlists
 
 # --- Classes que simulam a API do Kodi ---
 
@@ -55,13 +76,20 @@ class MockListItem:
         self.context_menu.extend(items)
     
     def getLabel(self):
-        return self.label
+        if isinstance(self.label, bytes):
+            return self.label.decode('utf-8', errors='ignore')
+        return str(self.label) if self.label is not None else ""
 
     def getPath(self):
-        return self.path
+        if isinstance(self.path, bytes):
+            return self.path.decode('utf-8', errors='ignore')
+        return str(self.path) if self.path is not None else ""
 
     def setPath(self, path):
         self.path = path
+
+    def getProperty(self, key):
+        return self.properties.get(key, "")
 
 class MockXBMC:
     LOGDEBUG, LOGINFO, LOGNOTICE, LOGWARNING, LOGERROR, LOGFATAL, LOGNONE = range(7)
@@ -81,7 +109,22 @@ class MockXBMC:
 
     @staticmethod
     def executeJSONRPC(json_rpc):
-        return '{"result": null}'
+        # Simulação básica para evitar crashes em plugins que buscam info do addon
+        try:
+            req = json.loads(json_rpc)
+            if "Addons.GetAddonDetails" in req.get("method", ""):
+                return json.dumps({
+                    "result": {
+                        "addon": {
+                            "addonid": req.get("params", {}).get("addonid", "unknown"),
+                            "version": "1.0.0",
+                            "enabled": True
+                        }
+                    }
+                })
+        except:
+            pass
+        return '{"result": {"value": "ok"}}'
 
     @staticmethod
     def getSkinDir():
@@ -89,7 +132,12 @@ class MockXBMC:
 
     @staticmethod
     def getLanguage(format=0):
-        return "English"
+        # Retorna Português para compatibilidade com plugins BR (BrazucaPlay)
+        if format == MockXBMC.ISO_639_1:
+            return "pt"
+        if format == MockXBMC.ISO_639_2:
+            return "por"
+        return "Portuguese (Brazil)"
 
     @staticmethod
     def convertLanguage(language, format):
@@ -97,7 +145,7 @@ class MockXBMC:
 
     @staticmethod
     def getSupportedMedia(mediaType):
-        return ".mp4|.mkv|.avi|.mov|.wmv|.flv|.webm|.mp3|.wav|.m4v"
+        return ".mp4|.mkv|.avi|.mov|.wmv|.flv|.webm|.mp3|.wav|.m4v|.ts|.m3u8"
 
     @staticmethod
     def sleep(time):
@@ -108,11 +156,36 @@ class MockXBMC:
     def getCondVisibility(condition):
         if 'inputstream.adaptive' in condition:
             return True
+        if 'System.Platform.Android' in condition:
+            return False
+        if 'System.HasAddon' in condition:
+            # Tenta extrair o ID do addon: System.HasAddon(id)
+            match = re.search(r'System\.HasAddon\(([^)]+)\)', condition)
+            if match:
+                addon_id = match.group(1)
+                # Retorna True se estiver nos mocks ou instalado
+                if addon_id in sys.modules or os.path.exists(os.path.join(ADDONS_DIR, addon_id)):
+                    return True
+            return True # Assume true por segurança
         return False
 
     @staticmethod
     def getInfoLabel(info):
-        return ""
+        info_lower = info.lower()
+        if info_lower == 'system.buildversion':
+            return "19.0"
+            
+        # Retorna "0" para chaves que parecem numéricas para evitar crashes de int("")
+        # Expandido para incluir mais casos comuns em plugins complexos
+        if any(x in info_lower for x in ['duration', 'count', 'time', 'year', 'number', 'index', 'dbid', 'season', 'episode', 'view', 'system', 'container', 'playlist', 'id', 'position', 'total', 'progress']):
+            return "0"
+            
+        # Se for chave de texto conhecida, retorna vazio sem aviso
+        if any(x in info_lower for x in ['label', 'title', 'plot', 'path', 'icon', 'thumb', 'art', 'genre', 'studio', 'country', 'premiered', 'name']):
+            return ""
+            
+        print(f"[WARNING] getInfoLabel('{info}') desconhecido. Retornando '0'.")
+        return "0"
 
     @staticmethod
     def getUserAgent():
@@ -120,7 +193,7 @@ class MockXBMC:
 
     @staticmethod
     def getRegion(id):
-        return "US"
+        return "BR"
 
     class Keyboard:
         def __init__(self, default='', heading='', hidden=False):
@@ -157,22 +230,43 @@ class MockXBMC:
             pass
         def play(self, item='', listitem=None, windowed=False, startpos=-1):
             print(f"[KODI PLAYER] Play: {item}")
+            
+            target_url = item
+            target_listitem = listitem
+            
+            # Suporte a reprodução de Playlist (objeto ou ID)
+            if isinstance(item, MockXBMC.PlayList):
+                item = item.id
+            elif hasattr(item, 'id') and hasattr(item, 'add'): # Fallback para reload de classes
+                item = item.id
+            
+            if isinstance(item, int):
+                playlists = get_playlists()
+                if item in playlists and playlists[item]:
+                    # Pega o item na posição startpos ou 0
+                    idx = startpos if startpos >= 0 else 0
+                    if idx < len(playlists[item]):
+                        entry = playlists[item][idx]
+                        target_url = entry['url']
+                        target_listitem = entry['listitem'] or target_listitem
+                        print(f"[KODI PLAYER] Resolvido da Playlist ({item}): {target_url}")
+
             # Salva a URL para o VideoPlayer pegar via bridge_data
             data = get_bridge_data()
-            data["resolved_url"] = item
+            data["resolved_url"] = str(target_url) if target_url is not None else ""
             
-            if listitem:
-                info = getattr(listitem, 'info', {}).copy()
-                art = getattr(listitem, 'art', {}).copy()
+            if target_listitem:
+                info = getattr(target_listitem, 'info', {}).copy()
+                art = getattr(target_listitem, 'art', {}).copy()
                 if 'title' not in info:
-                    info['title'] = listitem.getLabel()
+                    info['title'] = target_listitem.getLabel()
                 
                 data["media_info"] = {
                     "title": info.get('title'),
                     "artist": info.get('artist'),
                     "plot": info.get('plot'),
                     "icon": art.get('icon') or art.get('thumb'),
-                    "type": getattr(listitem, 'media_type', 'video')
+                    "type": getattr(target_listitem, 'media_type', 'video')
                 }
 
         def stop(self):
@@ -212,10 +306,14 @@ class MockXBMC:
 
     class PlayList:
         def __init__(self, playlist):
-            pass
-        def clear(self): pass
-        def add(self, url, listitem=None, index=-1): pass
-        def size(self): return 0
+            self.id = playlist
+        def clear(self):
+            get_playlists()[self.id] = []
+        def add(self, url, listitem=None, index=-1):
+            # Armazena o item na playlist correta
+            get_playlists()[self.id].append({'url': url, 'listitem': listitem})
+        def size(self):
+            return len(get_playlists().get(self.id, []))
         def getposition(self): return 0
 
     class Actor:
@@ -252,7 +350,15 @@ class MockXBMCGUI:
 
         def select(self, heading, list):
             print(f"[DIALOG SELECT] {heading}")
-            return 0 if list else -1
+            if hasattr(_local, 'dialog_answers') and _local.dialog_answers:
+                return _local.dialog_answers.pop(0)
+            if list:
+                raise DialogSelectError(heading, list)
+            return -1
+
+        def input(self, heading, default="", type=1, option=0, password=False):
+            print(f"[DIALOG INPUT] {heading}")
+            return default or "search term"
             
     class DialogProgress:
         def create(self, heading, message=""): pass
@@ -267,10 +373,25 @@ class MockXBMCGUI:
         def isFinished(self): return True
 
     class Window:
-        def __init__(self, windowId): pass
-        def getProperty(self, key): return ""
-        def setProperty(self, key, value): pass
-        def clearProperty(self, key): pass
+        def __init__(self, windowId):
+            self.id = windowId
+        def getProperty(self, key):
+            props = get_window_props()
+            val = props.get(f"{self.id}_{key}", "")
+            if not val:
+                 # Heurística defensiva: se não tem valor e não parece texto, retorna "0"
+                 key_lower = key.lower()
+                 if not any(x in key_lower for x in ['name', 'label', 'title', 'path', 'icon', 'thumb', 'art']):
+                     return "0"
+            return val
+        def setProperty(self, key, value):
+            props = get_window_props()
+            props[f"{self.id}_{key}"] = str(value)
+        def clearProperty(self, key):
+            props = get_window_props()
+            k = f"{self.id}_{key}"
+            if k in props:
+                del props[k]
         def getFocusId(self): return 0
         def getControl(self, id): return None
 
@@ -336,6 +457,9 @@ class MockXBMCPlugin:
     @staticmethod
     def addDirectoryItem(handle, url, listitem, isFolder=False, totalItems=0):
         # Captura o item que o plugin quer mostrar na tela
+        if isinstance(url, bytes):
+            url = url.decode('utf-8', errors='ignore')
+            
         get_bridge_data()["items"].append({
             'url': url,
             'label': listitem.getLabel(),
@@ -428,14 +552,36 @@ class MockXBMCVFS:
 
     @staticmethod
     def translatePath(path):
-        if path.startswith("special://"):
-            # Mapeia special://profile para ./kodi_profile
-            path = path.replace("special://profile", "kodi_profile")
-            path = path.replace("special://temp", "kodi_temp")
-            path = path.replace("special://home", "kodi_home")
-            # Remove o protocolo se sobrou algo desconhecido
-            path = path.replace("special://", "")
-            path = os.path.abspath(path)
+        # Normaliza barras
+        path = path.replace("\\", "/")
+        
+        if path.startswith("special://home/addons/"):
+            # Tenta resolver para o caminho real do addon (instalado ou dev)
+            rel_path = path.replace("special://home/addons/", "")
+            parts = rel_path.split("/")
+            addon_id = parts[0]
+            
+            # Verifica onde o addon está instalado
+            candidate_1 = os.path.join(ADDONS_DIR, addon_id)
+            candidate_2 = os.path.join(PLUGINS_REPO_DIR, addon_id)
+            
+            base = candidate_1
+            if os.path.exists(candidate_2):
+                base = candidate_2
+            
+            if len(parts) > 1:
+                path = os.path.join(base, *parts[1:])
+            else:
+                path = base
+                
+        elif path.startswith("special://home"):
+             path = path.replace("special://home", DATA_DIR)
+        elif path.startswith("special://profile"):
+             path = path.replace("special://profile", os.path.join(DATA_DIR, "userdata"))
+        elif path.startswith("special://temp"):
+             path = path.replace("special://temp", os.path.join(DATA_DIR, "temp"))
+        elif path.startswith("special://"):
+             path = path.replace("special://", os.path.join(DATA_DIR, ""))
         
         # Hack para plugins que esperam bytes e chamam .decode() em strings
         class DecodableString(str):
@@ -529,6 +675,102 @@ class MockLocalizedString(str):
     def decode(self, encoding="utf-8", errors="strict"):
         return self
 
+class MockInputStreamHelper:
+    class Helper:
+        def __init__(self, protocol, drm=None):
+            pass
+        def check_inputstream(self):
+            return True
+        def inputstream_addon(self):
+            return 'inputstream.adaptive'
+
+class MockRouting:
+    class Plugin:
+        def __init__(self, *args, **kwargs):
+            self.routes = []
+
+        def route(self, path_pattern):
+            def decorator(func):
+                # Transforma padrão de rota do plugin em Regex
+                # Ex: '/play/<video_id>' -> '^/play/(?P<video_id>[^/]+)$'
+                pattern = path_pattern
+                if not pattern.startswith('^'):
+                    regex = "^"
+                    parts = pattern.split('/')
+                    for part in parts:
+                        if not part: continue
+                        regex += "/"
+                        if part.startswith('<') and part.endswith('>'):
+                            name = part[1:-1]
+                            if ':' in name: name = name.split(':')[0] # Remove tipo ex: <int:id>
+                            regex += f"(?P<{name}>[^/]+)"
+                        else:
+                            regex += re.escape(part)
+                    regex += "$"
+                    if pattern == "/": regex = "^/$"
+                else:
+                    regex = pattern
+                
+                self.routes.append((regex, func))
+                return func
+            return decorator
+
+        def run(self):
+            # Reconstrói o caminho a partir do sys.argv
+            full_url = sys.argv[0]
+            if len(sys.argv) > 2:
+                full_url += sys.argv[2]
+            
+            path = "/"
+            if "://" in full_url:
+                try:
+                    # Remove protocolo e ID do addon: plugin://plugin.video.exemplo/foo/bar -> /foo/bar
+                    rest = full_url.split("://", 1)[1]
+                    if "/" in rest:
+                        path = "/" + rest.split("/", 1)[1]
+                        # Remove query string do path para matching
+                        if "?" in path:
+                            path = path.split("?", 1)[0]
+                    else:
+                        path = "/"
+                except:
+                    path = "/"
+            
+            # Tenta casar com as rotas registradas
+            for pattern, func in self.routes:
+                match = re.match(pattern, path)
+                if match:
+                    kwargs = match.groupdict()
+                    try:
+                        func(**kwargs)
+                    except TypeError:
+                        # Fallback caso a função não aceite argumentos nomeados
+                        func()
+                    return
+            
+            print(f"[MockRouting] 404 Not Found: {path}")
+
+class MockResolveURL:
+    @staticmethod
+    def resolve(url):
+        return url
+    
+    class HostedMediaFile:
+        def __init__(self, url, **kwargs):
+            self.url = url
+        def resolve(self):
+            return self.url
+
+class MockMetaHandler:
+    class metahandlers:
+        class MetaData:
+            def __init__(self, preparezip=False):
+                pass
+            def get_meta(self, media_type, name, **kwargs):
+                return {}
+            def get_episode_meta(self, *args, **kwargs):
+                return {}
+
 class MockXBMCAddon:
     class Addon:
         def __init__(self, id=None):
@@ -541,7 +783,7 @@ class MockXBMCAddon:
                     self.id = "unknown"
             
             # Configura caminho de persistência de configurações
-            self.profile_path = os.path.join(os.getcwd(), "kodi_profile", "addon_data", self.id)
+            self.profile_path = os.path.join(DATA_DIR, "userdata", "addon_data", self.id)
             self.settings_file = os.path.join(self.profile_path, "settings.json")
             self._settings = {}
             self._load_settings()
@@ -576,18 +818,18 @@ class MockXBMCAddon:
                 return self.profile_path
             if id == 'id': return self.id
             if id == 'name': return self.id
-            if id == 'path': return os.path.join(os.getcwd(), "data", "addons", self.id)
+            if id == 'path': return MockXBMCVFS.translatePath(f"special://home/addons/{self.id}")
             if id == 'version': return "1.0.0"
             if id == 'icon': 
                 # Tenta encontrar o ícone na pasta de addons instalados
-                icon_path = os.path.join(os.getcwd(), "data", "addons", self.id, "icon.png")
+                icon_path = os.path.join(ADDONS_DIR, self.id, "icon.png")
                 if os.path.exists(icon_path): return icon_path
                 
                 # Tenta encontrar na pasta de plugins locais (Dev)
-                icon_path = os.path.join(os.getcwd(), "plugin", self.id, "icon.png")
+                icon_path = os.path.join(PLUGINS_REPO_DIR, self.id, "icon.png")
                 if os.path.exists(icon_path): return icon_path
                 
-                return os.path.join(os.getcwd(), "data", "addons", self.id, "icon.png")
+                return os.path.join(ADDONS_DIR, self.id, "icon.png")
             return ''
         
         def getSetting(self, id):
@@ -598,7 +840,29 @@ class MockXBMCAddon:
             if 'port' in id: return "8080"
             if 'whitelist' in id: return "false"
             if 'mpd' in id: return "false"
-            return "" # Default genérico
+            
+            # Heurística: se o nome da configuração sugere número, retorna valor seguro
+            # Evita erro: invalid literal for int() with base 10: ''
+            id_lower = id.lower()
+            
+            if 'timeout' in id_lower:
+                return "60"
+            
+            if any(x in id_lower for x in ['cache', 'buffer']):
+                return "100"
+
+            if any(x in id_lower for x in ['limit', 'count', 'items', 'page', 'time', 'duration', 'width', 'height', 'cache', 'buffer', 'port', 'num', 'max', 'min', 'size', 'interval', 'timeout', 'level', 'bitrate', 'view', 'mode', 'depth', 'current', 'total', 'progress']):
+                return "10"
+            
+            if any(x in id_lower for x in ['enable', 'show', 'use', 'hide', 'active', 'auto']):
+                return "true"
+            
+            # Silencia warnings para configurações comuns de plugins BR
+            if any(x in id_lower for x in ['opt', 'extra', 'layout', 'pass', 'favoritos', 'epg', 'pais']):
+                return "0"
+
+            print(f"[WARNING] getSetting('{id}') não encontrado. Retornando '0' como padrão para evitar crash.")
+            return "0" # Default genérico para evitar int('')
             
         def setSetting(self, id, value):
             self._settings[id] = value
@@ -610,21 +874,21 @@ class MockXBMCAddon:
 
 def setup_mocks():
     """Injeta os módulos falsos no sistema para o plugin importar."""
-    if 'xbmc' not in sys.modules:
-        sys.modules['xbmc'] = MockXBMC
-        sys.modules['xbmcgui'] = MockXBMCGUI
-        sys.modules['xbmcplugin'] = MockXBMCPlugin
-        sys.modules['xbmcaddon'] = MockXBMCAddon
-        sys.modules['xbmcvfs'] = MockXBMCVFS
+    # Atualiza sempre os módulos para evitar incompatibilidade de classes (reload do Streamlit)
+    sys.modules['xbmc'] = MockXBMC
+    sys.modules['xbmcgui'] = MockXBMCGUI
+    sys.modules['xbmcplugin'] = MockXBMCPlugin
+    sys.modules['xbmcaddon'] = MockXBMCAddon
+    sys.modules['xbmcvfs'] = MockXBMCVFS
 
-    if 'kodi_six' not in sys.modules:
-        kodi_six = type(sys)('kodi_six')
-        kodi_six.xbmc = MockXBMC
-        kodi_six.xbmcgui = MockXBMCGUI
-        kodi_six.xbmcplugin = MockXBMCPlugin
-        kodi_six.xbmcaddon = MockXBMCAddon
-        kodi_six.xbmcvfs = MockXBMCVFS
-        sys.modules['kodi_six'] = kodi_six
+    # Atualiza kodi_six
+    kodi_six = sys.modules.get('kodi_six', type(sys)('kodi_six'))
+    kodi_six.xbmc = MockXBMC
+    kodi_six.xbmcgui = MockXBMCGUI
+    kodi_six.xbmcplugin = MockXBMCPlugin
+    kodi_six.xbmcaddon = MockXBMCAddon
+    kodi_six.xbmcvfs = MockXBMCVFS
+    sys.modules['kodi_six'] = kodi_six
 
     if 'infotagger' not in sys.modules:
         infotagger = type(sys)('infotagger')
@@ -634,10 +898,35 @@ def setup_mocks():
         sys.modules['infotagger'] = infotagger
         sys.modules['infotagger.listitem'] = infotagger_listitem
 
-def run_plugin(plugin_path, param_string=""):
+    if 'inputstreamhelper' not in sys.modules:
+        sys.modules['inputstreamhelper'] = MockInputStreamHelper
+
+    if 'simplejson' not in sys.modules:
+        sys.modules['simplejson'] = json
+        
+    if 'routing' not in sys.modules:
+        sys.modules['routing'] = MockRouting
+
+    if 'resolveurl' not in sys.modules:
+        sys.modules['resolveurl'] = MockResolveURL
+        
+    if 'urlresolver' not in sys.modules:
+        sys.modules['urlresolver'] = MockResolveURL
+        
+    if 'metahandler' not in sys.modules:
+        sys.modules['metahandler'] = MockMetaHandler
+
+def run_plugin(plugin_path, param_string="", dialog_answers=None):
     """Executa o plugin e retorna os itens ou a URL resolvida."""
     with _plugin_lock:
         setup_mocks()
+        
+        # Injeta respostas de diálogos se houver (para retomar execução)
+        _local.dialog_answers = list(dialog_answers) if dialog_answers else []
+        
+        # Suprime avisos de dependência do requests (comum em addons antigos)
+        warnings.filterwarnings("ignore", message=".*urllib3.*doesn't match a supported version.*")
+        warnings.filterwarnings("ignore", category=SyntaxWarning)
         
         # Patch global no requests para evitar bloqueios (User-Agent)
         if 'requests' in sys.modules:
@@ -730,15 +1019,31 @@ def run_plugin(plugin_path, param_string=""):
 
         try:
             # Carrega o arquivo main.py do plugin dinamicamente
-            spec = importlib.util.spec_from_file_location("plugin_main", plugin_path)
+            # Usamos __main__ para garantir que blocos if __name__ == "__main__" rodem
+            spec = importlib.util.spec_from_file_location("__main__", plugin_path)
             module = importlib.util.module_from_spec(spec)
-            sys.modules["plugin_main"] = module
             
-            # Executa o código do plugin
-            spec.loader.exec_module(module)
+            # Backup do __main__ real
+            real_main = sys.modules.get("__main__")
+            sys.modules["__main__"] = module
             
-            # Se o plugin tiver uma função router e não rodou pelo __main__, chamamos manualmente
-            if hasattr(module, 'router'):
+            try:
+                # Executa o código do plugin
+                spec.loader.exec_module(module)
+            except SystemExit:
+                pass
+            finally:
+                # Restaura __main__
+                if real_main:
+                    sys.modules["__main__"] = real_main
+                else:
+                    if "__main__" in sys.modules:
+                        del sys.modules["__main__"]
+            
+            # Se o plugin tiver uma função router e não rodou pelo __main__ (ou se o __main__ não fez nada)
+            # Verificamos se temos itens ou url resolvida. Se não, tentamos o router.
+            data = get_bridge_data()
+            if not data["items"] and not data["resolved_url"] and hasattr(module, 'router'):
                 # Remove o '?' inicial para a função router, pois parse_qs não gosta dele
                 # e a maioria dos plugins (como Erome) faz sys.argv[2][1:] no __main__
                 arg = sys.argv[2]
@@ -746,6 +1051,22 @@ def run_plugin(plugin_path, param_string=""):
                     arg = arg[1:]
                 module.router(arg)
                 
+        except DialogSelectError as e:
+            print(f"[BRIDGE] Interrompido para seleção: {e.heading}")
+            return {
+                "items": [
+                    {
+                        "label": f"{item}",
+                        "url": f"resume:select:{i}",
+                        "isFolder": False,
+                        "art": {"icon": "https://upload.wikimedia.org/wikipedia/commons/thumb/e/e4/Infobox_info_icon.svg/1024px-Infobox_info_icon.svg.png"}
+                    }
+                    for i, item in enumerate(e.options)
+                ],
+                "resolved_url": None,
+                "media_info": {},
+                "dialog_heading": e.heading
+            }
         except Exception as e:
             print(f"Erro no Plugin: {e}")
             import traceback

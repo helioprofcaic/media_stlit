@@ -53,7 +53,7 @@ class RepositoryBrowser(QDialog):
         
         # Lista de Repositórios (StreamedEZ adicionado por padrão)
         self.repos = [
-            {"name": "Local Plugins (media_hl/plugin)", "url": PLUGINS_REPO_DIR},
+            {"name": "Local Plugins (media_stlit/plugin)", "url": PLUGINS_REPO_DIR},
             {"name": "StreamedEZ Repo", "url": "https://blazeymcblaze.github.io/streamedez/"}
         ]
         
@@ -96,37 +96,41 @@ class RepositoryBrowser(QDialog):
 
     def scan_installed_repos(self):
         """Escaneia addons instalados para encontrar repositórios e adicioná-los à lista."""
-        if not os.path.exists(ADDONS_DIR):
-            return
+        dirs_to_scan = []
+        if os.path.exists(ADDONS_DIR):
+            dirs_to_scan.append(ADDONS_DIR)
+        if os.path.exists(PLUGINS_REPO_DIR):
+            dirs_to_scan.append(PLUGINS_REPO_DIR)
 
-        for item_name in os.listdir(ADDONS_DIR):
-            addon_path = os.path.join(ADDONS_DIR, item_name)
-            addon_xml = os.path.join(addon_path, 'addon.xml')
-            
-            if os.path.isdir(addon_path) and os.path.exists(addon_xml):
-                try:
-                    with open(addon_xml, 'r', encoding='utf-8', errors='ignore') as f:
-                        xml_content = f.read()
-                    root = ET.fromstring(xml_content)
-                    
-                    # Verifica se é um repositório
-                    repo_ext = None
-                    for ext in root.findall('extension'):
-                        if ext.get('point') == 'xbmc.addon.repository':
-                            repo_ext = ext
-                            break
-                    
-                    if repo_ext:
-                        repo_name = root.get('name', item_name)
-                        # Pega a última definição de diretório (geralmente a versão mais nova)
-                        dirs = repo_ext.findall('dir')
-                        if dirs:
-                            target_dir = dirs[-1]
-                            info = target_dir.find('info')
-                            if info is not None and info.text:
-                                self.repos.append({"name": f"{repo_name} [Instalado]", "url": info.text})
-                except Exception as e:
-                    log_to_file(f"Erro ao escanear repo {item_name}: {e}")
+        for base_dir in dirs_to_scan:
+            for item_name in os.listdir(base_dir):
+                addon_path = os.path.join(base_dir, item_name)
+                addon_xml = os.path.join(addon_path, 'addon.xml')
+                
+                if os.path.isdir(addon_path) and os.path.exists(addon_xml):
+                    try:
+                        with open(addon_xml, 'r', encoding='utf-8', errors='ignore') as f:
+                            xml_content = f.read()
+                        root = ET.fromstring(xml_content)
+                        
+                        # Verifica se é um repositório
+                        repo_ext = None
+                        for ext in root.findall('extension'):
+                            if ext.get('point') == 'xbmc.addon.repository':
+                                repo_ext = ext
+                                break
+                        
+                        if repo_ext:
+                            repo_name = root.get('name', item_name)
+                            # Pega a última definição de diretório (geralmente a versão mais nova)
+                            dirs = repo_ext.findall('dir')
+                            if dirs:
+                                target_dir = dirs[-1]
+                                info = target_dir.find('info')
+                                if info is not None and info.text:
+                                    self.repos.append({"name": f"{repo_name} [Instalado]", "url": info.text})
+                    except Exception as e:
+                        log_to_file(f"Erro ao escanear repo {item_name}: {e}")
 
     def add_custom_repo(self):
         url, ok = QInputDialog.getText(self, "Adicionar Repositório", "URL do Repositório (onde está o addons.xml):")
@@ -152,9 +156,13 @@ class RepositoryBrowser(QDialog):
         response = None
         xml_url = None
         
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
+        
         for url in candidates:
             try:
-                r = requests.get(url, timeout=10)
+                r = requests.get(url, timeout=15, headers=headers)
                 if r.status_code == 200:
                     response = r
                     xml_url = url
@@ -216,9 +224,13 @@ class RepositoryBrowser(QDialog):
         response = None
         xml_url = None
         
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
+        
         for url in candidates:
             try:
-                r = requests.get(url, timeout=10)
+                r = requests.get(url, timeout=15, headers=headers)
                 if r.status_code == 200:
                     response = r
                     xml_url = url
@@ -252,8 +264,8 @@ class RepositoryBrowser(QDialog):
                     target_dir = None
                     for d in repo_ext.findall('dir'):
                         if d.find('info') is not None and d.find('datadir') is not None:
+                            # Continua o loop para que a última definição (geralmente a mais recente) seja usada.
                             target_dir = d
-                            break
                     
                     if target_dir:
                         info_url = target_dir.find('info').text
@@ -262,7 +274,7 @@ class RepositoryBrowser(QDialog):
                         self.status_label.setText(f"Redirecionando para {info_url}...")
                         QApplication.processEvents()
                         
-                        response = requests.get(info_url, timeout=10)
+                        response = requests.get(info_url, timeout=15, headers=headers)
                         response.raise_for_status()
                         
                         content = response.content.decode('utf-8', errors='ignore')
@@ -343,8 +355,12 @@ class RepositoryBrowser(QDialog):
         self.status_label.setText(f"Baixando {data['name']}...")
         QApplication.processEvents()
         
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
+        
         try:
-            response = requests.get(data['url'], stream=True, timeout=20)
+            response = requests.get(data['url'], stream=True, timeout=30, headers=headers)
             response.raise_for_status()
             
             with zipfile.ZipFile(io.BytesIO(response.content)) as z:

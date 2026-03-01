@@ -7,9 +7,17 @@ import xml.etree.ElementTree as ET
 import urllib.parse
 import google_storage
 import socket
+import re
 
 # Adiciona o diretório atual ao path para importar os módulos core
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+# --- Configuração de Bibliotecas Locais (Fallback) ---
+LOCAL_LIB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "libs")
+if not os.path.exists(LOCAL_LIB_DIR):
+    os.makedirs(LOCAL_LIB_DIR)
+if LOCAL_LIB_DIR not in sys.path:
+    sys.path.insert(0, LOCAL_LIB_DIR)
 
 from core.kodi_bridge import run_plugin
 from core.utils import PLUGINS_REPO_DIR, ADDONS_DIR
@@ -31,6 +39,12 @@ if 'preview_media' not in st.session_state:
     st.session_state.preview_media = None # Armazena metadados antes do play
 
 # --- Funções Auxiliares ---
+
+def remove_kodi_formatting(text):
+    """Remove tags de formatação do Kodi ([B], [COLOR], etc)."""
+    if not text: return ""
+    # Remove tags como [B], [/B], [COLOR red], [CR], etc.
+    return re.sub(r'\[/?[A-Z]+(?: [^\]]+)?\]', '', text, flags=re.IGNORECASE)
 
 def install_dependencies(plugin_path):
     """Lê o addon.xml e tenta instalar dependências Python via pip."""
@@ -54,15 +68,17 @@ def install_dependencies(plugin_path):
             'script.module.urllib3': 'urllib3',
             'script.module.six': 'six',
             'script.module.future': 'future',
-            'script.module.kodi-six': 'kodi-six',
-            'script.module.simplejson': 'simplejson',
+            'script.module.kodi-six': None,
+            'script.module.simplejson': None, # Usa json nativo
             'script.module.mechanize': 'mechanize',
             'script.module.cloudscraper': 'cloudscraper',
             'script.module.pycryptodome': 'pycryptodome',
             'script.module.netunblock': None,
             'script.module.resolveurl': None,
+            'script.module.routing': None, # Mockado no bridge
             'script.module.urlresolver': None,
             'script.module.metahandler': None,
+            'script.module.inputstreamhelper': None,
         }
 
         for import_tag in requires.findall('import'):
@@ -80,12 +96,19 @@ def install_dependencies(plugin_path):
             
             if pip_package:
                 # Verifica se já está instalado
-                spec = importlib.util.find_spec(pip_package)
-                # Tratamento para pacotes com nomes de import diferentes
-                if pip_package == 'beautifulsoup4':
-                    spec = importlib.util.find_spec('bs4')
-                if pip_package == 'pycryptodome':
-                    spec = importlib.util.find_spec('Crypto')
+                # Mapeia nome do pacote pip para nome do import real
+                PIP_IMPORTS = {
+                    'beautifulsoup4': 'bs4',
+                    'pycryptodome': 'Crypto',
+                    'kodi-six': 'kodi_six',
+                }
+                import_name = PIP_IMPORTS.get(pip_package, pip_package)
+                
+                # Se já estiver carregado (ex: mocks do bridge), ignora para evitar erro de spec
+                if import_name in sys.modules:
+                    continue
+                
+                spec = importlib.util.find_spec(import_name)
                 
                 if spec is None:
                     packages_to_install.append(pip_package)
@@ -97,14 +120,59 @@ def install_dependencies(plugin_path):
                     importlib.invalidate_caches()
                     st.toast(f"Dependências instaladas!", icon="✅")
                 except subprocess.CalledProcessError:
-                    st.warning(f"Não foi possível instalar algumas dependências automaticamente: {packages_to_install}")
+                    # Fallback: Tenta instalar no diretório local (libs)
+                    try:
+                        subprocess.check_call([sys.executable, "-m", "pip", "install", "--target", LOCAL_LIB_DIR] + packages_to_install)
+                        importlib.invalidate_caches()
+                        st.toast(f"Dependências instaladas localmente!", icon="✅")
+                    except subprocess.CalledProcessError:
+                        st.warning(f"Não foi possível instalar algumas dependências automaticamente: {packages_to_install}")
             
     except Exception as e:
         print(f"Erro ao verificar dependências: {e}")
 
-def navigate_to(url, label="Home"):
+def navigate_to(url, label="Home", dialog_answers=None):
     """Executa o plugin e atualiza o estado com os novos itens."""
     
+    # --- Lógica de Resume (Retomar execução com resposta do Dialog) ---
+    if url.startswith("resume:select:"):
+        try:
+            idx = int(url.split(":")[-1])
+            # Usa a URL atual (que gerou o dialog) para re-executar o plugin
+            if st.session_state.current_url:
+                current_label = st.session_state.history[-1][1] if st.session_state.history else "Voltar"
+                navigate_to(st.session_state.current_url, current_label, dialog_answers=[idx])
+        except Exception as e:
+            st.error(f"Erro ao processar seleção: {e}")
+        return
+    
+    if url.startswith("install://"):
+        try:
+            # Parse da URL: install://addon.id?zip=...&name=...
+            parsed = urllib.parse.urlparse(url)
+            query = urllib.parse.parse_qs(parsed.query)
+            zip_url = query.get('zip', [None])[0]
+            name = query.get('name', [parsed.netloc])[0]
+            
+            if not zip_url:
+                st.error("URL de instalação inválida.")
+                return
+
+            with st.spinner(f"Baixando e instalando {name}..."):
+                import requests, zipfile, io
+                headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+                r = requests.get(zip_url, headers=headers, timeout=60)
+                r.raise_for_status()
+                
+                with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+                    z.extractall(ADDONS_DIR)
+                
+                st.success(f"✅ {name} instalado com sucesso!")
+                st.info("Recarregue a página (F5) para ver o novo plugin na lista.")
+        except Exception as e:
+            st.error(f"❌ Erro ao instalar: {e}")
+        return
+
     # --- Suporte a Google Drive (Navegação de Pastas) ---
     if url.startswith("gdrive_folder://"):
         folder_id = url.replace("gdrive_folder://", "")
@@ -179,8 +247,16 @@ def navigate_to(url, label="Home"):
                 # Executa a ponte
                 # Extrai parâmetros da URL
                 params = url
-                result = run_plugin(entry_point, params)
+                result = run_plugin(entry_point, params, dialog_answers=dialog_answers)
                 
+                if result.get("dialog_heading"):
+                    # O plugin pediu uma seleção (ex: escolher servidor)
+                    st.session_state.current_items = result["items"]
+                    # Não limpamos current_url para permitir o resume na mesma URL
+                    st.session_state.video_url = None
+                    st.toast(f"Selecione: {result['dialog_heading']}")
+                    return
+
                 if result.get("resolved_url"):
                     # É um vídeo para tocar
                     # NÃO define video_url direto (evita autoplay). Define preview.
@@ -192,7 +268,70 @@ def navigate_to(url, label="Home"):
                     st.session_state.current_url = url
                     st.session_state.video_url = None # Limpa vídeo anterior
             else:
-                st.error(f"Plugin não encontrado em: {plugin_path}")
+                # Tenta verificar se é um Repositório (que não tem main.py)
+                addon_xml = os.path.join(plugin_path, 'addon.xml')
+                is_repo = False
+                if os.path.exists(addon_xml):
+                    try:
+                        tree = ET.parse(addon_xml)
+                        root = tree.getroot()
+                        
+                        # Procura extensão de repositório
+                        for ext in root.findall('extension'):
+                            if ext.get('point') == 'xbmc.addon.repository':
+                                is_repo = True
+                                # Tenta extrair a URL do XML de addons
+                                dirs = ext.findall('dir')
+                                if dirs:
+                                    # Usa a última definição (geralmente a mais recente)
+                                    target_dir = dirs[-1]
+                                    info_node = target_dir.find('info')
+                                    datadir_node = target_dir.find('datadir')
+                                    
+                                    if info_node is not None and info_node.text:
+                                        info_url = info_node.text
+                                        # Define URL base para downloads (datadir ou diretório do info)
+                                        base_url = datadir_node.text if datadir_node is not None and datadir_node.text else os.path.dirname(info_url)
+                                        if not base_url.endswith('/'): base_url += '/'
+
+                                        with st.spinner(f"Lendo repositório: {info_url}..."):
+                                            import requests
+                                            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+                                            r = requests.get(info_url, headers=headers, timeout=15)
+                                            r.raise_for_status()
+                                            
+                                            remote_root = ET.fromstring(r.content)
+                                            repo_items = []
+                                            for addon in remote_root.findall('addon'):
+                                                a_id = addon.get('id')
+                                                a_ver = addon.get('version')
+                                                a_name = addon.get('name')
+                                                
+                                                if not a_id or not a_ver:
+                                                    continue
+                                                
+                                                if not a_name:
+                                                    a_name = a_id
+                                                
+                                                # Monta URL do ZIP: base/id/id-version.zip
+                                                zip_link = f"{base_url}{a_id}/{a_id}-{a_ver}.zip"
+                                                safe_zip = urllib.parse.quote(zip_link)
+                                                safe_name = urllib.parse.quote(a_name)
+                                                
+                                                repo_items.append({
+                                                    'label': f"⬇️ {a_name} v{a_ver}",
+                                                    'url': f"install://{a_id}?zip={safe_zip}&name={safe_name}",
+                                                    'isFolder': False,
+                                                    'art': {'icon': 'https://upload.wikimedia.org/wikipedia/commons/thumb/e/e1/Kodi_logo.svg/1024px-Kodi_logo.svg.png'}
+                                                })
+                                            st.session_state.current_items = repo_items
+                                            st.session_state.current_url = url
+                                            return
+                    except Exception as e:
+                        st.warning(f"Erro ao ler repositório: {e}")
+                
+                if not is_repo:
+                    st.error(f"Plugin não encontrado em: {plugin_path}")
         except Exception as e:
             st.error(f"Erro ao executar plugin: {e}")
 
@@ -315,21 +454,70 @@ with st.sidebar:
     source_mode = st.radio("Escolha a origem:", ["Plugins Kodi", "Google Drive", "Arquivos Locais"])
     
     if source_mode == "Plugins Kodi":
-        plugins = []
+        plugins_by_category = {}
+        
         # Escaneia pastas
         for d in [ADDONS_DIR, PLUGINS_REPO_DIR]:
             if os.path.exists(d):
                 for item in os.listdir(d):
-                    if os.path.isdir(os.path.join(d, item)) and os.path.exists(os.path.join(d, item, 'addon.xml')):
-                        plugins.append(item)
+                    plugin_path = os.path.join(d, item)
+                    addon_xml = os.path.join(plugin_path, 'addon.xml')
+                    
+                    if os.path.isdir(plugin_path) and os.path.exists(addon_xml):
+                        # Tenta extrair nome do XML
+                        name = item
+                        try:
+                            tree = ET.parse(addon_xml)
+                            root = tree.getroot()
+                            name = root.get('name', item)
+                        except:
+                            pass
+                        name = remove_kodi_formatting(name)
+                        
+                        # Categoriza pelo ID
+                        category = "Outros"
+                        if item.startswith("plugin.video"):
+                            category = "Vídeo"
+                        elif item.startswith("plugin.audio"):
+                            category = "Áudio"
+                        elif item.startswith("plugin.program"):
+                            category = "Programas"
+                        elif item.startswith("repository"):
+                            category = "Repositórios"
+                        elif item.startswith("script"):
+                            category = "Scripts"
+                            
+                        if category not in plugins_by_category:
+                            plugins_by_category[category] = []
+                        
+                        # Evita duplicatas
+                        if not any(p['id'] == item for p in plugins_by_category[category]):
+                            plugins_by_category[category].append({'id': item, 'name': name})
+
+        # Ordena categorias
+        categories = sorted(plugins_by_category.keys())
         
-        selected_plugin = st.selectbox("Escolha um Plugin", ["Selecione..."] + list(set(plugins)))
-        
-        if st.button("Carregar Plugin"):
-            if selected_plugin and selected_plugin != "Selecione...":
-                start_url = f"plugin://{selected_plugin}/"
-                st.session_state.history = [(start_url, selected_plugin)]
-                navigate_to(start_url)
+        if not categories:
+            st.warning("Nenhum plugin encontrado.")
+        else:
+            # Seleção de Categoria
+            selected_category = st.selectbox("Categoria", ["Selecione..."] + categories)
+            
+            if selected_category != "Selecione...":
+                # Lista de plugins da categoria
+                cat_plugins = plugins_by_category[selected_category]
+                # Cria labels para o selectbox: "Nome (ID)"
+                plugin_options = {f"{p['name']} ({p['id']})": p['id'] for p in cat_plugins}
+                
+                selected_label = st.selectbox("Plugin", ["Selecione..."] + list(plugin_options.keys()))
+                
+                if st.button("Carregar Plugin"):
+                    if selected_label != "Selecione...":
+                        selected_id = plugin_options[selected_label]
+                        selected_name = next((p['name'] for p in cat_plugins if p['id'] == selected_id), selected_id)
+                        start_url = f"plugin://{selected_id}/"
+                        st.session_state.history = [(start_url, selected_name)]
+                        navigate_to(start_url)
 
     elif source_mode == "Google Drive":
         if st.button("📂 Carregar Drive"):
@@ -394,6 +582,7 @@ with st.sidebar:
 if st.session_state.history:
     # Função para limpar nomes técnicos de plugins
     def clean_label(label):
+        label = remove_kodi_formatting(label)
         if label.startswith("plugin."):
             return label.split(".")[-1].replace("_", " ").title()
         return label
@@ -429,9 +618,9 @@ if st.session_state.get('video_url'):
         if st.session_state.get('preview_media'):
             info = st.session_state.preview_media.get('media_info', {})
             if info.get('title'):
-                display_title = info['title']
+                display_title = remove_kodi_formatting(info['title'])
                 if info.get('artist'):
-                    display_title = f"{info['artist']} - {display_title}"
+                    display_title = f"{remove_kodi_formatting(info['artist'])} - {display_title}"
             
             media_type = info.get('type', 'video')
             if media_type == 'music':
@@ -496,7 +685,7 @@ elif st.session_state.get('preview_media'):
                 st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/2/21/Speaker_Icon.svg/1024px-Speaker_Icon.svg.png", width=100)
                 
         with col_prev_2:
-            title = info.get('title', 'Pronto para reproduzir')
+            title = remove_kodi_formatting(info.get('title', 'Pronto para reproduzir'))
             media_type = info.get('type', 'video')
             
             icon = "🎬" # default video
@@ -508,9 +697,9 @@ elif st.session_state.get('preview_media'):
             st.markdown(f"### {icon} {title}")
             
             if info.get('artist'):
-                st.write(f"**Artista:** {info['artist']}")
+                st.write(f"**Artista:** {remove_kodi_formatting(info['artist'])}")
             if info.get('plot'):
-                st.caption(info['plot'])
+                st.caption(remove_kodi_formatting(info['plot']))
             elif not info:
                 st.write("O arquivo foi resolvido e está pronto.")
             
@@ -547,7 +736,13 @@ if st.session_state.history:
     
     with st.expander("📂 Navegador de Arquivos", expanded=not is_viewing_content):
         if not items:
-            st.info(f"Pasta vazia ou erro ao carregar.\nURL: {st.session_state.current_url}")
+            # Se a URL atual existe, a pasta está realmente vazia.
+            if st.session_state.current_url:
+                st.info(f"Esta pasta está vazia.\nURL: {st.session_state.current_url}")
+            # Se não há URL, significa que a navegação inicial falhou.
+            else:
+                st.error("Ocorreu um erro ao tentar carregar o conteúdo.")
+                st.warning("Isso pode acontecer se o plugin falhou ao iniciar ou se houve um problema de conexão. Tente carregar novamente ou escolha outra fonte.")
         
         for idx, item in enumerate(items):
             # Layout em grid para ficar mais compacto e moderno
@@ -563,10 +758,12 @@ if st.session_state.history:
                 
             # Botão
             label = item['label']
-            if col2.button(label, key=f"btn_{idx}", use_container_width=True):
+            clean_text = remove_kodi_formatting(label)
+            if col2.button(clean_text, key=f"btn_{idx}", use_container_width=True):
                 new_url = item['url']
-                st.session_state.history.append((new_url, label))
-                navigate_to(new_url, label)
+                if not new_url.startswith("resume:"):
+                    st.session_state.history.append((new_url, clean_text))
+                navigate_to(new_url, clean_text)
                 st.rerun()
 else:
     st.info("👈 Selecione um plugin na barra lateral para começar.")
