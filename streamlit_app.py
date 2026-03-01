@@ -550,19 +550,40 @@ with st.sidebar:
         with st.expander("📤 Upload de Arquivo"):
             uploaded_file = st.file_uploader("Enviar Mídia", type=['mp4', 'mkv', 'avi', 'mp3', 'wav'])
             if uploaded_file is not None:
-                if st.button("Confirmar Upload"):
-                    # Determina a pasta de destino baseada na navegação atual
-                    target_folder = None
-                    if st.session_state.current_url and st.session_state.current_url.startswith("gdrive_folder://"):
-                        target_folder = st.session_state.current_url.replace("gdrive_folder://", "")
-                        if target_folder == "root": target_folder = None
+                # Detecta se estamos navegando no Drive ou Local
+                is_gdrive = st.session_state.current_url and st.session_state.current_url.startswith("gdrive")
+                
+                btn_label = "Enviar para Google Drive" if is_gdrive else "Salvar no Servidor (Temporário)"
+                
+                if st.button(btn_label):
+                    if is_gdrive:
+                        # Determina a pasta de destino baseada na navegação atual
+                        target_folder = None
+                        if st.session_state.current_url.startswith("gdrive_folder://"):
+                            target_folder = st.session_state.current_url.replace("gdrive_folder://", "")
+                            if target_folder == "root": target_folder = None
 
-                    with st.spinner("Enviando para o Google Drive..."):
-                        fid = google_storage.upload_file(uploaded_file, uploaded_file.name, folder_id=target_folder)
-                        if fid:
-                            st.success("Upload concluído com sucesso!")
-                        else:
-                            st.error("Falha no envio.")
+                        with st.spinner("Enviando para o Google Drive..."):
+                            fid = google_storage.upload_file(uploaded_file, uploaded_file.name, folder_id=target_folder)
+                            if fid:
+                                st.success("Upload concluído com sucesso!")
+                            else:
+                                st.error("Falha no envio.")
+                    else:
+                        # Salva localmente em data/uploads
+                        save_dir = os.path.join(os.getcwd(), "data", "uploads")
+                        if not os.path.exists(save_dir):
+                            os.makedirs(save_dir)
+                        
+                        file_path = os.path.join(save_dir, uploaded_file.name)
+                        try:
+                            with open(file_path, "wb") as f:
+                                f.write(uploaded_file.getbuffer())
+                            st.success(f"Salvo em: {file_path}")
+                            st.info("Navegue até a pasta 'data/uploads' pelo Explorador Local para reproduzir.")
+                            st.warning("⚠️ Atenção: Arquivos no servidor são apagados ao reiniciar o app.")
+                        except Exception as e:
+                            st.error(f"Erro ao salvar: {e}")
         
         st.markdown("---")
         with st.expander("🔧 Diagnóstico de Conexão"):
@@ -615,6 +636,7 @@ if st.session_state.get('video_url'):
         # Tenta obter título dos metadados salvos
         display_title = "Reproduzindo Agora"
         icon = "🍿"
+        media_type = 'video' # Padrão
         if st.session_state.get('preview_media'):
             info = st.session_state.preview_media.get('media_info', {})
             if info.get('title'):
@@ -622,7 +644,7 @@ if st.session_state.get('video_url'):
                 if info.get('artist'):
                     display_title = f"{remove_kodi_formatting(info['artist'])} - {display_title}"
             
-            media_type = info.get('type', 'video')
+            media_type = info.get('type', 'video') # Pega o tipo de mídia
             if media_type == 'music':
                 icon = "🎵"
             elif media_type == 'video':
@@ -637,7 +659,11 @@ if st.session_state.get('video_url'):
             st.warning(f"⚠️ Requer headers: {headers}")
             url = clean_url
 
-        st.video(url, autoplay=True)
+        # Usa o player correto para cada tipo de mídia
+        if media_type == 'music':
+            st.audio(url, autoplay=True)
+        else:
+            st.video(url, autoplay=True)
         
         # Se for link do Google Drive, oferece opções de fallback (Iframe e Aviso de Permissão)
         if "drive.google.com" in url:
@@ -760,10 +786,43 @@ if st.session_state.history:
             label = item['label']
             clean_text = remove_kodi_formatting(label)
             if col2.button(clean_text, key=f"btn_{idx}", use_container_width=True):
-                new_url = item['url']
-                if not new_url.startswith("resume:"):
-                    st.session_state.history.append((new_url, clean_text))
-                navigate_to(new_url, clean_text)
+                # --- Verifica se o item é uma pasta ou um arquivo para tocar ---
+                if not item.get('isFolder'):
+                    # --- ARQUIVO/STREAM PARA TOCAR ---
+                    # Extrai os metadados do 'listitem' que a ponte do Kodi nos envia
+                    listitem = item.get('listitem')
+                    media_info = {}
+                    
+                    if listitem:
+                        info = getattr(listitem, 'info', {}).copy()
+                        art = getattr(listitem, 'art', {}).copy()
+                        item_type = getattr(listitem, 'media_type', 'video')
+                        
+                        if 'title' not in info:
+                            info['title'] = listitem.getLabel()
+                        
+                        media_info = {
+                            "title": info.get('title'),
+                            "artist": info.get('artist'),
+                            "plot": info.get('plot'),
+                            "icon": art.get('icon') or art.get('thumb'),
+                            "type": item_type
+                        }
+                    else:
+                        media_info = {"title": clean_text, "type": "video"}
+
+                    # Define o estado de pré-visualização para mostrar a tela de "play"
+                    st.session_state.preview_media = {
+                        "resolved_url": item['url'],
+                        "media_info": media_info
+                    }
+                    st.session_state.video_url = None
+                else:
+                    # --- PASTA ---
+                    new_url = item['url']
+                    if not new_url.startswith("resume:"):
+                        st.session_state.history.append((new_url, clean_text))
+                    navigate_to(new_url, clean_text)
                 st.rerun()
 else:
     st.info("👈 Selecione um plugin na barra lateral para começar.")

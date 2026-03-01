@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<addon id="plugin.audio.radio_online" name="Rádio Online" version="1.0.0" provider-name="Media Player">
+  <requires>
+    <import addon="xbmc.python" version="3.0.0"/>
+    <import addon="script.module.requests" version="2.25.1"/>
+  </requires>
+  <extension point="xbmc.python.pluginsource" library="main.py">
+    <provides>audio</provides>
+  </extension>
+  <extension point="xbmc.addon.metadata">
+    <summary lang="pt_BR">Busque e ouça rádios online</summary>
+    <description lang="pt_BR">Plugin simples para buscar estações de rádio usando a API Radio-Browser.</description>
+    <platform>all</platform>
+  </extension>
+</addon>
