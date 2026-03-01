@@ -870,6 +870,10 @@ class MockXBMCAddon:
             if any(x in id_lower for x in ['opt', 'extra', 'layout', 'pass', 'favoritos', 'epg', 'pais']):
                 return "0"
 
+            # Retorna string vazia para campos de texto/credenciais para evitar "0"
+            if any(x in id_lower for x in ['user', 'name', 'email', 'login', 'token', 'key', 'url', 'path', 'search', 'query']):
+                return ""
+
             print(f"[WARNING] getSetting('{id}') não encontrado. Retornando '0' como padrão para evitar crash.")
             return "0" # Default genérico para evitar int('')
             
@@ -1091,5 +1095,9 @@ def run_plugin(plugin_path, param_string="", dialog_answers=None):
             print(f"Erro no Plugin: {e}")
             import traceback
             traceback.print_exc()
+            # Adiciona o erro aos dados para exibir na interface
+            data = get_bridge_data()
+            data["error"] = str(e)
+            return data
 
         return get_bridge_data()

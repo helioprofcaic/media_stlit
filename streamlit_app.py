@@ -39,6 +39,12 @@ if 'preview_media' not in st.session_state:
     st.session_state.preview_media = None # Armazena metadados antes do play
 if 'input_dialog' not in st.session_state:
     st.session_state.input_dialog = None # Armazena estado do diálogo de texto
+if 'recent_history' not in st.session_state:
+    st.session_state.recent_history = [] # Histórico persistente da Home
+if 'last_error' not in st.session_state:
+    st.session_state.last_error = None # Armazena erro do último plugin executado
+if 'dialog_heading' not in st.session_state:
+    st.session_state.dialog_heading = None # Armazena título do diálogo de seleção
 
 # --- Funções Auxiliares ---
 
@@ -223,11 +229,15 @@ def navigate_to(url, label="Home", dialog_answers=None):
             "resolved_url": stream_url,
             "media_info": {"title": label, "type": "video", "icon": "https://upload.wikimedia.org/wikipedia/commons/d/da/Google_Drive_logo.png"}
         }
-        st.session_state.video_url = None
+        st.session_state.video_url = stream_url
         return
 
     # Se for plugin://, executa via bridge
     if url.startswith("plugin://"):
+        # Limpa itens atuais preventivamente para evitar "fantasma" da interface antiga
+        # se o carregamento falhar ou demorar.
+        st.session_state.current_items = []
+        
         try:
             # Identifica o caminho físico do plugin
             plugin_id = url.replace("plugin://", "").split("/")[0]
@@ -251,12 +261,16 @@ def navigate_to(url, label="Home", dialog_answers=None):
                 params = url
                 result = run_plugin(entry_point, params, dialog_answers=dialog_answers)
                 
+                # Captura erro se houver
+                st.session_state.last_error = result.get("error")
+                # Captura título do diálogo se houver
+                st.session_state.dialog_heading = result.get("dialog_heading")
+                
                 if result.get("dialog_heading"):
                     # O plugin pediu uma seleção (ex: escolher servidor)
                     st.session_state.current_items = result["items"]
                     # Não limpamos current_url para permitir o resume na mesma URL
                     st.session_state.video_url = None
-                    st.toast(f"Selecione: {result['dialog_heading']}")
                     return
 
                 if result.get("dialog_input"):
@@ -268,9 +282,9 @@ def navigate_to(url, label="Home", dialog_answers=None):
 
                 if result.get("resolved_url"):
                     # É um vídeo para tocar
-                    # NÃO define video_url direto (evita autoplay). Define preview.
+                    # Define preview e inicia reprodução direta (Autoplay)
                     st.session_state.preview_media = result
-                    st.session_state.video_url = None 
+                    st.session_state.video_url = result["resolved_url"]
                 else:
                     # É um diretório
                     st.session_state.current_items = result["items"]
@@ -480,6 +494,12 @@ with st.sidebar:
     st.header("Fonte de Mídia")
     source_mode = st.radio("Escolha a origem:", ["Plugins Kodi", "Google Drive", "Arquivos Locais"])
     
+    # Botão Global de Parar (Útil quando o player está tocando rádio de fundo)
+    if st.session_state.get('video_url'):
+        if st.button("⏹️ Parar Reprodução", use_container_width=True, type="primary"):
+            st.session_state.video_url = None
+            st.rerun()
+    
     if source_mode == "Plugins Kodi":
         plugins_by_category = {}
         
@@ -540,6 +560,10 @@ with st.sidebar:
                 
                 if st.button("Carregar Plugin"):
                     if selected_label != "Selecione...":
+                        # Reseta o player e preview ao trocar de plugin
+                        st.session_state.video_url = None
+                        st.session_state.preview_media = None
+                        
                         selected_id = plugin_options[selected_label]
                         selected_name = next((p['name'] for p in cat_plugins if p['id'] == selected_id), selected_id)
                         start_url = f"plugin://{selected_id}/"
@@ -686,10 +710,13 @@ if st.session_state.get('video_url'):
             st.warning(f"⚠️ Requer headers: {headers}")
             url = clean_url
 
-        # Usa o player correto para cada tipo de mídia
+        # Usa o player correto para cada tipo de mídia.
+        # O parâmetro 'key' força o Streamlit a recriar o componente quando a URL muda, parando o áudio anterior.
         if media_type == 'music':
+            st.audio(url, autoplay=True, key=f"audio_{url}")
             st.audio(url, autoplay=True)
         else:
+            st.video(url, autoplay=True, key=f"video_{url}")
             st.video(url, autoplay=True)
         
         # Se for link do Google Drive, oferece opções de fallback (Iframe e Aviso de Permissão)
@@ -786,12 +813,20 @@ if st.session_state.history:
     items = st.session_state.current_items
     # Fecha a lista se estiver vendo vídeo ou preview para focar no conteúdo
     is_viewing_content = (st.session_state.get('video_url') is not None) or (st.session_state.get('preview_media') is not None)
+
+    # --- MENSAGENS PERSISTENTES (Fora do Expander) ---
+    if st.session_state.last_error:
+        st.error(f"❌ Erro no Plugin: {st.session_state.last_error}")
+        
+    if st.session_state.dialog_heading:
+        st.info(f"👉 Selecione: **{st.session_state.dialog_heading}**")
     
     with st.expander("📂 Navegador de Arquivos", expanded=not is_viewing_content):
+            
         if not items:
             # Se a URL atual existe, a pasta está realmente vazia.
             if st.session_state.current_url:
-                st.info(f"Esta pasta está vazia.\nURL: {st.session_state.current_url}")
+                    st.info(f"Esta pasta está vazia.\nURL: {st.session_state.current_url}")
             # Se não há URL, significa que a navegação inicial falhou.
             else:
                 st.error("Ocorreu um erro ao tentar carregar o conteúdo.")
@@ -843,7 +878,7 @@ if st.session_state.history:
                         "resolved_url": item['url'],
                         "media_info": media_info
                     }
-                    st.session_state.video_url = None
+                    st.session_state.video_url = item['url']
                 else:
                     # --- PASTA ---
                     new_url = item['url']
@@ -852,4 +887,73 @@ if st.session_state.history:
                     navigate_to(new_url, clean_text)
                 st.rerun()
 else:
-    st.info("👈 Selecione um plugin na barra lateral para começar.")
+    # --- PÁGINA INICIAL (DASHBOARD) ---
+    st.markdown("## 🏠 Início")
+    
+    # Seção 1: Acesso Rápido
+    st.subheader("🚀 Acesso Rápido")
+    c1, c2, c3 = st.columns(3)
+    
+    with c1:
+        if st.button("📂 Google Drive", use_container_width=True):
+            start_url = "gdrive_folder://root"
+            st.session_state.history = [(start_url, "Google Drive")]
+            navigate_to(start_url, "Google Drive")
+            st.rerun()
+            
+    with c2:
+        if st.button("💻 Arquivos Locais", use_container_width=True):
+            local_explorer_id = "plugin.video.local_explorer"
+            if os.path.exists(os.path.join(ADDONS_DIR, local_explorer_id)) or \
+               os.path.exists(os.path.join(PLUGINS_REPO_DIR, local_explorer_id)):
+                start_url = f"plugin://{local_explorer_id}/"
+                st.session_state.history = [(start_url, "Arquivos Locais")]
+                navigate_to(start_url, "Arquivos Locais")
+                st.rerun()
+            else:
+                st.toast("Plugin Local Explorer não encontrado.", icon="⚠️")
+
+    with c3:
+        if st.button("⚙️ Sincronizar Plugins", use_container_width=True):
+            sync_drive_plugins()
+
+    # Seção 2: Histórico Recente
+    if st.session_state.get('recent_history'):
+        st.subheader("🕒 Recentes")
+        for item in st.session_state.recent_history[:5]:
+            if st.button(f"📄 {item['label']}", key=f"hist_{item['url']}", use_container_width=True):
+                st.session_state.history = [(item['url'], item['label'])]
+                navigate_to(item['url'], item['label'])
+                st.rerun()
+
+    # Seção 3: Plugins Instalados (Grid)
+    st.subheader("🧩 Meus Plugins")
+    found_plugins = []
+    for d in [ADDONS_DIR, PLUGINS_REPO_DIR]:
+        if os.path.exists(d):
+            for item in os.listdir(d):
+                plugin_path = os.path.join(d, item)
+                addon_xml = os.path.join(plugin_path, 'addon.xml')
+                if os.path.isdir(plugin_path) and os.path.exists(addon_xml):
+                    name = item
+                    try:
+                        tree = ET.parse(addon_xml)
+                        name = tree.getroot().get('name', item)
+                    except: pass
+                    name = remove_kodi_formatting(name)
+                    if item.startswith("plugin.video") or item.startswith("plugin.audio"):
+                        if not any(p['id'] == item for p in found_plugins):
+                            found_plugins.append({'id': item, 'name': name})
+    
+    if found_plugins:
+        cols = st.columns(3)
+        for i, plugin in enumerate(found_plugins):
+            col = cols[i % 3]
+            with col:
+                if st.button(plugin['name'], key=f"home_plugin_{plugin['id']}", use_container_width=True):
+                    start_url = f"plugin://{plugin['id']}/"
+                    st.session_state.history = [(start_url, plugin['name'])]
+                    navigate_to(start_url)
+                    st.rerun()
+    else:
+        st.info("Nenhum plugin de mídia encontrado.")
