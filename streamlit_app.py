@@ -1,13 +1,10 @@
 import streamlit as st
 import os
 import sys
-import subprocess
-import importlib.util
 import xml.etree.ElementTree as ET
 import urllib.parse
 import google_storage
 import socket
-import re
 
 # Adiciona o diretório atual ao path para importar os módulos core
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -19,8 +16,10 @@ if not os.path.exists(LOCAL_LIB_DIR):
 if LOCAL_LIB_DIR not in sys.path:
     sys.path.insert(0, LOCAL_LIB_DIR)
 
-from core.kodi_bridge import run_plugin
 from core.utils import PLUGINS_REPO_DIR, ADDONS_DIR
+from modules.utils import remove_kodi_formatting
+from modules.drive_sync import sync_drive_plugins, sync_local_plugins
+from modules.navigation import navigate_to, go_back
 
 st.set_page_config(page_title="Streamlit Media Player", layout="wide")
 
@@ -45,377 +44,11 @@ if 'last_error' not in st.session_state:
     st.session_state.last_error = None # Armazena erro do último plugin executado
 if 'dialog_heading' not in st.session_state:
     st.session_state.dialog_heading = None # Armazena título do diálogo de seleção
+if 'local_sync_done' not in st.session_state:
+    # Garante que plugins padrão estejam em data/addons na primeira execução
+    sync_local_plugins()
+    st.session_state.local_sync_done = True
 
-# --- Funções Auxiliares ---
-
-def remove_kodi_formatting(text):
-    """Remove tags de formatação do Kodi ([B], [COLOR], etc)."""
-    if not text: return ""
-    # Remove tags como [B], [/B], [COLOR red], [CR], etc.
-    return re.sub(r'\[/?[A-Z]+(?: [^\]]+)?\]', '', text, flags=re.IGNORECASE)
-
-def install_dependencies(plugin_path):
-    """Lê o addon.xml e tenta instalar dependências Python via pip."""
-    addon_xml = os.path.join(plugin_path, 'addon.xml')
-    if not os.path.exists(addon_xml):
-        return
-
-    try:
-        tree = ET.parse(addon_xml)
-        root = tree.getroot()
-        requires = root.find('requires')
-        if requires is None:
-            return
-
-        packages_to_install = []
-        
-        # Mapeamento de nomes do Kodi para PyPI
-        KODI_TO_PIP = {
-            'script.module.requests': 'requests',
-            'script.module.beautifulsoup4': 'beautifulsoup4',
-            'script.module.urllib3': 'urllib3',
-            'script.module.six': 'six',
-            'script.module.future': 'future',
-            'script.module.kodi-six': None,
-            'script.module.simplejson': None, # Usa json nativo
-            'script.module.mechanize': 'mechanize',
-            'script.module.cloudscraper': 'cloudscraper',
-            'script.module.pycryptodome': 'pycryptodome',
-            'script.module.netunblock': None,
-            'script.module.resolveurl': None,
-            'script.module.routing': None, # Mockado no bridge
-            'script.module.urlresolver': None,
-            'script.module.metahandler': None,
-            'script.module.inputstreamhelper': None,
-        }
-
-        for import_tag in requires.findall('import'):
-            addon_id = import_tag.get('addon')
-            if not addon_id or addon_id == 'xbmc.python':
-                continue
-            
-            pip_package = None
-            # Verifica se está no mapa (pode ser None para ignorar)
-            if addon_id in KODI_TO_PIP:
-                pip_package = KODI_TO_PIP[addon_id]
-            # Se não estiver no mapa, tenta inferir removendo o prefixo
-            elif addon_id.startswith('script.module.'):
-                pip_package = addon_id.replace('script.module.', '')
-            
-            if pip_package:
-                # Verifica se já está instalado
-                # Mapeia nome do pacote pip para nome do import real
-                PIP_IMPORTS = {
-                    'beautifulsoup4': 'bs4',
-                    'pycryptodome': 'Crypto',
-                    'kodi-six': 'kodi_six',
-                }
-                import_name = PIP_IMPORTS.get(pip_package, pip_package)
-                
-                # Se já estiver carregado (ex: mocks do bridge), ignora para evitar erro de spec
-                if import_name in sys.modules:
-                    continue
-                
-                spec = importlib.util.find_spec(import_name)
-                
-                if spec is None:
-                    packages_to_install.append(pip_package)
-
-        if packages_to_install:
-            with st.spinner(f"Instalando dependências: {', '.join(packages_to_install)}..."):
-                try:
-                    subprocess.check_call([sys.executable, "-m", "pip", "install"] + packages_to_install)
-                    importlib.invalidate_caches()
-                    st.toast(f"Dependências instaladas!", icon="✅")
-                except subprocess.CalledProcessError:
-                    # Fallback: Tenta instalar no diretório local (libs)
-                    try:
-                        subprocess.check_call([sys.executable, "-m", "pip", "install", "--target", LOCAL_LIB_DIR] + packages_to_install)
-                        importlib.invalidate_caches()
-                        st.toast(f"Dependências instaladas localmente!", icon="✅")
-                    except subprocess.CalledProcessError:
-                        st.warning(f"Não foi possível instalar algumas dependências automaticamente: {packages_to_install}")
-            
-    except Exception as e:
-        print(f"Erro ao verificar dependências: {e}")
-
-def navigate_to(url, label="Home", dialog_answers=None):
-    """Executa o plugin e atualiza o estado com os novos itens."""
-    
-    # --- Lógica de Resume (Retomar execução com resposta do Dialog) ---
-    if url.startswith("resume:select:"):
-        try:
-            idx = int(url.split(":")[-1])
-            # Usa a URL atual (que gerou o dialog) para re-executar o plugin
-            if st.session_state.current_url:
-                current_label = st.session_state.history[-1][1] if st.session_state.history else "Voltar"
-                navigate_to(st.session_state.current_url, current_label, dialog_answers=[idx])
-        except Exception as e:
-            st.error(f"Erro ao processar seleção: {e}")
-        return
-    
-    if url.startswith("install://"):
-        try:
-            # Parse da URL: install://addon.id?zip=...&name=...
-            parsed = urllib.parse.urlparse(url)
-            query = urllib.parse.parse_qs(parsed.query)
-            zip_url = query.get('zip', [None])[0]
-            name = query.get('name', [parsed.netloc])[0]
-            
-            if not zip_url:
-                st.error("URL de instalação inválida.")
-                return
-
-            with st.spinner(f"Baixando e instalando {name}..."):
-                import requests, zipfile, io
-                headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
-                r = requests.get(zip_url, headers=headers, timeout=60)
-                r.raise_for_status()
-                
-                with zipfile.ZipFile(io.BytesIO(r.content)) as z:
-                    z.extractall(ADDONS_DIR)
-                
-                st.success(f"✅ {name} instalado com sucesso!")
-                st.info("Recarregue a página (F5) para ver o novo plugin na lista.")
-        except Exception as e:
-            st.error(f"❌ Erro ao instalar: {e}")
-        return
-
-    # --- Suporte a Google Drive (Navegação de Pastas) ---
-    if url.startswith("gdrive_folder://"):
-        folder_id = url.replace("gdrive_folder://", "")
-        if folder_id == "root":
-            folder_id = None # Usa o ID configurado no secrets
-            
-        with st.spinner("Listando arquivos do Drive..."):
-            files = google_storage.list_files_with_link(folder_id)
-            
-            drive_items = []
-            if files:
-                for f in files:
-                    mime = f.get('mimeType', '')
-                    # Pastas
-                    if mime == 'application/vnd.google-apps.folder':
-                        drive_items.append({
-                            'label': f.get('name'),
-                            'url': f"gdrive_folder://{f.get('id')}",
-                            'isFolder': True,
-                            'art': {'icon': 'https://upload.wikimedia.org/wikipedia/commons/thumb/4/42/Folder-icon-yellow.svg/1024px-Folder-icon-yellow.svg.png'}
-                        })
-                    # Arquivos de Mídia
-                    elif 'video' in mime or 'audio' in mime:
-                        drive_items.append({
-                            'label': f.get('name'),
-                            'url': f"gdrive://{f.get('id')}",
-                            'isFolder': False,
-                            'art': {'thumb': f.get('thumbnailLink')}
-                        })
-                
-                # Ordena: Pastas primeiro, depois nome
-                drive_items.sort(key=lambda x: (not x['isFolder'], x['label'].lower()))
-            
-            st.session_state.current_items = drive_items
-            st.session_state.current_url = url
-            st.session_state.video_url = None
-        return
-
-    # --- Suporte a Google Drive ---
-    if url.startswith("gdrive://"):
-        file_id = url.replace("gdrive://", "")
-        # Gera link direto de streaming (requer que o arquivo esteja como 'Qualquer pessoa com o link' ou autenticado)
-        stream_url = f"https://drive.google.com/uc?export=download&id={file_id}"
-        
-        st.session_state.preview_media = {
-            "resolved_url": stream_url,
-            "media_info": {"title": label, "type": "video", "icon": "https://upload.wikimedia.org/wikipedia/commons/d/da/Google_Drive_logo.png"}
-        }
-        st.session_state.video_url = stream_url
-        return
-
-    # Se for plugin://, executa via bridge
-    if url.startswith("plugin://"):
-        # Limpa itens atuais preventivamente para evitar "fantasma" da interface antiga
-        # se o carregamento falhar ou demorar.
-        st.session_state.current_items = []
-        
-        try:
-            # Identifica o caminho físico do plugin
-            plugin_id = url.replace("plugin://", "").split("/")[0]
-            
-            # Procura em addons instalados ou pasta de desenvolvimento
-            plugin_path = os.path.join(ADDONS_DIR, plugin_id)
-            if not os.path.exists(plugin_path):
-                plugin_path = os.path.join(PLUGINS_REPO_DIR, plugin_id)
-            
-            # Verifica e instala dependências antes de executar
-            install_dependencies(plugin_path)
-            
-            entry_point = os.path.join(plugin_path, "main.py")
-            if not os.path.exists(entry_point):
-                # Tenta default.py se main.py não existir
-                entry_point = os.path.join(plugin_path, "default.py")
-            
-            if os.path.exists(entry_point):
-                # Executa a ponte
-                # Extrai parâmetros da URL
-                params = url
-                result = run_plugin(entry_point, params, dialog_answers=dialog_answers)
-                
-                # Captura erro se houver
-                st.session_state.last_error = result.get("error")
-                # Captura título do diálogo se houver
-                st.session_state.dialog_heading = result.get("dialog_heading")
-                
-                if result.get("dialog_heading"):
-                    # O plugin pediu uma seleção (ex: escolher servidor)
-                    st.session_state.current_items = result["items"]
-                    # Não limpamos current_url para permitir o resume na mesma URL
-                    st.session_state.video_url = None
-                    return
-
-                if result.get("dialog_input"):
-                    # O plugin pediu input de texto
-                    st.session_state.input_dialog = result["dialog_input"]
-                    st.session_state.input_dialog_url = url # URL para retomar
-                    st.rerun()
-                    return
-
-                if result.get("resolved_url"):
-                    # É um vídeo para tocar
-                    # Define preview e inicia reprodução direta (Autoplay)
-                    st.session_state.preview_media = result
-                    st.session_state.video_url = result["resolved_url"]
-                else:
-                    # É um diretório
-                    st.session_state.current_items = result["items"]
-                    st.session_state.current_url = url
-                    st.session_state.video_url = None # Limpa vídeo anterior
-            else:
-                # Tenta verificar se é um Repositório (que não tem main.py)
-                addon_xml = os.path.join(plugin_path, 'addon.xml')
-                is_repo = False
-                if os.path.exists(addon_xml):
-                    try:
-                        tree = ET.parse(addon_xml)
-                        root = tree.getroot()
-                        
-                        # Procura extensão de repositório
-                        for ext in root.findall('extension'):
-                            if ext.get('point') == 'xbmc.addon.repository':
-                                is_repo = True
-                                # Tenta extrair a URL do XML de addons
-                                dirs = ext.findall('dir')
-                                if dirs:
-                                    # Usa a última definição (geralmente a mais recente)
-                                    target_dir = dirs[-1]
-                                    info_node = target_dir.find('info')
-                                    datadir_node = target_dir.find('datadir')
-                                    
-                                    if info_node is not None and info_node.text:
-                                        info_url = info_node.text
-                                        # Define URL base para downloads (datadir ou diretório do info)
-                                        base_url = datadir_node.text if datadir_node is not None and datadir_node.text else os.path.dirname(info_url)
-                                        if not base_url.endswith('/'): base_url += '/'
-
-                                        with st.spinner(f"Lendo repositório: {info_url}..."):
-                                            import requests
-                                            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
-                                            r = requests.get(info_url, headers=headers, timeout=15)
-                                            r.raise_for_status()
-                                            
-                                            remote_root = ET.fromstring(r.content)
-                                            repo_items = []
-                                            for addon in remote_root.findall('addon'):
-                                                a_id = addon.get('id')
-                                                a_ver = addon.get('version')
-                                                a_name = addon.get('name')
-                                                
-                                                if not a_id or not a_ver:
-                                                    continue
-                                                
-                                                if not a_name:
-                                                    a_name = a_id
-                                                
-                                                # Monta URL do ZIP: base/id/id-version.zip
-                                                zip_link = f"{base_url}{a_id}/{a_id}-{a_ver}.zip"
-                                                safe_zip = urllib.parse.quote(zip_link)
-                                                safe_name = urllib.parse.quote(a_name)
-                                                
-                                                repo_items.append({
-                                                    'label': f"⬇️ {a_name} v{a_ver}",
-                                                    'url': f"install://{a_id}?zip={safe_zip}&name={safe_name}",
-                                                    'isFolder': False,
-                                                    'art': {'icon': 'https://upload.wikimedia.org/wikipedia/commons/thumb/e/e1/Kodi_logo.svg/1024px-Kodi_logo.svg.png'}
-                                                })
-                                            st.session_state.current_items = repo_items
-                                            st.session_state.current_url = url
-                                            return
-                    except Exception as e:
-                        st.warning(f"Erro ao ler repositório: {e}")
-                
-                if not is_repo:
-                    st.error(f"Plugin não encontrado em: {plugin_path}")
-        except Exception as e:
-            st.error(f"Erro ao executar plugin: {e}")
-
-def go_back():
-    if len(st.session_state.history) > 1:
-        st.session_state.history.pop() # Remove atual
-        prev_url, prev_label = st.session_state.history[-1]
-        navigate_to(prev_url, prev_label)
-    else:
-        st.session_state.history = []
-        st.session_state.current_items = []
-        st.session_state.current_url = None
-    st.session_state.preview_media = None
-
-def sync_drive_plugins():
-    """Encontra e baixa as pastas de plugins do Google Drive."""
-    with st.spinner("Conectando ao Google Drive..."):
-        service = google_storage.get_drive_service()
-        root_id = google_storage.get_folder_id()
-        if not service or not root_id:
-            st.error("Falha na conexão com o Google Drive. Verifique as configurações.")
-            return
-
-    total_downloaded = 0
-    
-    # 1. Sincronizar pasta 'plugin'
-    with st.spinner("Procurando pasta 'plugin' no Drive..."):
-        plugin_folder_id = google_storage.find_folder_id(service, root_id, 'plugin')
-    
-    if plugin_folder_id:
-        with st.spinner("Sincronizando plugins de desenvolvimento..."):
-            if not os.path.exists(PLUGINS_REPO_DIR):
-                os.makedirs(PLUGINS_REPO_DIR)
-            count = google_storage.download_folder_recursively(service, plugin_folder_id, PLUGINS_REPO_DIR)
-            total_downloaded += count
-            st.toast(f"{count} itens sincronizados da pasta 'plugin'.")
-    else:
-        st.info("Pasta 'plugin' não encontrada na raiz do Drive.")
-
-    # 2. Sincronizar pasta 'data/addons'
-    with st.spinner("Procurando pasta 'data' no Drive..."):
-        data_folder_id = google_storage.find_folder_id(service, root_id, 'data')
-        addons_folder_id = None
-        if data_folder_id:
-            with st.spinner("Procurando pasta 'addons' dentro de 'data'..."):
-                addons_folder_id = google_storage.find_folder_id(service, data_folder_id, 'addons')
-
-    if addons_folder_id:
-        with st.spinner("Sincronizando addons instalados..."):
-            if not os.path.exists(ADDONS_DIR):
-                os.makedirs(ADDONS_DIR)
-            count = google_storage.download_folder_recursively(service, addons_folder_id, ADDONS_DIR)
-            total_downloaded += count
-            st.toast(f"{count} itens sincronizados de 'data/addons'.")
-    else:
-        st.info("Pasta 'data/addons' não encontrada no Drive.")
-
-    if total_downloaded > 0:
-        st.success("Sincronização concluída! Os plugins agora estão disponíveis na fonte 'Plugins Kodi'.")
-    else:
-        st.warning("Nenhuma pasta de plugin ('plugin' ou 'data/addons') encontrada para sincronizar.")
 
 # --- Interface ---
 
@@ -426,47 +59,63 @@ with col_header_1:
     st.title("📺 Media Player Web")
 
 with col_header_2:
-    # --- Lógica para obter a URL correta (Cloud vs. Local) ---
-    # 1. Tenta obter a URL pública configurada nos secrets (para deploy na nuvem)
-    app_url = st.secrets.get("media_player_drive", {}).get("public_url")
-    url_source = ""
-
-    if app_url:
-        url_source = "URL pública (secrets.toml)"
-    else:
-        # 2. Se não, tenta obter o IP local manual configurado nos secrets
-        local_ip_manual = st.secrets.get("media_player_drive", {}).get("local_ip")
-        if local_ip_manual:
-            app_url = f"http://{local_ip_manual}:8501"
-            url_source = "IP local manual (secrets.toml)"
-        else:
-            # 3. Se não houver URL pública nem IP manual, tenta descobrir o IP local (para uso em rede Wi-Fi)
-            try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                s.connect(("8.8.8.8", 80))
-                local_ip = s.getsockname()[0]
-                s.close()
-                app_url = f"http://{local_ip}:8501"
-                url_source = "IP local (detecção automática)"
-            except:
-                app_url = "http://localhost:8501" # Fallback final
-                url_source = "localhost (fallback)"
-
-    # Imprime no console a URL que realmente está sendo usada (para debug)
-    print(f"🔗 URL DE ACESSO (QR CODE): {app_url} (Fonte: {url_source})")
+    # --- Detecção de Endereços (Público e Local) ---
+    public_url = st.secrets.get("media_player_drive", {}).get("public_url")
+    
+    local_ips = []
+    try:
+        # Método 1: Conexão externa (IP da rota padrão - mais confiável)
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(0.1)
+        s.connect(("8.8.8.8", 80))
+        local_ips.append(s.getsockname()[0])
+        s.close()
+    except: pass
+    
+    try:
+        # Método 2: Listar interfaces de rede (para pegar 192.168.x.x, 10.x.x.x, etc)
+        hostname = socket.gethostname()
+        _, _, ips = socket.gethostbyname_ex(hostname)
+        for ip in ips:
+            if ip.startswith("192.168.") or ip.startswith("10.") or (ip.startswith("172.") and 16 <= int(ip.split('.')[1]) <= 31):
+                if ip not in local_ips:
+                    local_ips.append(ip)
+    except: pass
+    
+    if not local_ips:
+        local_ips = ["localhost"]
 
     with st.popover("📱 Acessar"):
         st.markdown("### 📲 Conectar Celular")
         
-        # Permite edição manual do IP na interface para correção imediata
-        current_host = app_url.split("://")[-1].split(":")[0]
-        manual_host = st.text_input("IP da Máquina:", value=current_host, help="Se o QR Code estiver errado, digite o IP correto aqui (ex: 192.168.0.15).")
+        # Abas para Público vs Local
+        tabs_labels = []
+        if public_url: tabs_labels.append("☁️ Público")
+        tabs_labels.append("🏠 Local")
         
-        final_url = f"http://{manual_host}:8501"
+        selected_tab = st.radio("Rede:", tabs_labels, horizontal=True, label_visibility="collapsed")
         
-        qr_code_url = f"https://api.qrserver.com/v1/create-qr-code/?size=200x200&data={urllib.parse.quote(final_url)}"
-        st.image(qr_code_url, width=200)
-        st.code(final_url, language="text")
+        target_url = ""
+        
+        if selected_tab == "☁️ Público":
+            target_url = public_url
+            st.caption("Acesso via Internet (Requer URL configurada no secrets.toml)")
+        else:
+            # Se houver múltiplos IPs locais, permite escolher
+            if len(local_ips) > 1:
+                selected_ip = st.selectbox("Selecione o IP:", local_ips)
+            else:
+                selected_ip = local_ips[0]
+            
+            target_url = f"http://{selected_ip}:8501"
+            st.caption("Acesso via Wi-Fi (Mesma rede)")
+
+        if target_url:
+            # Gera QR Code
+            encoded_url = urllib.parse.quote(target_url)
+            qr_url = f"https://api.qrserver.com/v1/create-qr-code/?size=250x250&data={encoded_url}"
+            st.image(qr_url, width=250)
+            st.code(target_url, language="text")
         
         st.divider()
         st.warning("🚫 **Não conecta?**\n\n1. Verifique se o celular está no **mesmo Wi-Fi**.\n2. O **Firewall do Windows** pode estar bloqueando. Tente desativá-lo temporariamente para testar.")
@@ -706,17 +355,35 @@ if st.session_state.get('video_url'):
         
         if "|" in url:
             clean_url = url.split("|")[0]
-            headers = url.split("|")[1]
-            st.warning(f"⚠️ Requer headers: {headers}")
+            headers_str = url.split("|")[1]
+            
+            # Tenta resolver redirecionamentos (ex: Blogger/Google) que precisam de headers apenas na 1ª requisição
+            try:
+                headers = {}
+                for h in headers_str.split('&'):
+                    if '=' in h:
+                        k, v = h.split('=', 1)
+                        headers[urllib.parse.unquote(k)] = urllib.parse.unquote(v)
+                
+                if headers:
+                    import requests
+                    # Faz request sem baixar conteúdo (stream=True) e sem seguir redirect automático para pegar o Location
+                    r = requests.get(clean_url, headers=headers, allow_redirects=False, stream=True, timeout=5)
+                    if r.status_code in [301, 302, 303, 307, 308] and 'Location' in r.headers:
+                        clean_url = r.headers['Location']
+            except Exception as e:
+                print(f"Falha ao resolver URL protegida: {e}")
+
+            with st.expander("⚠️ Informações de Proteção (Headers)", expanded=False):
+                st.warning("Este vídeo usa proteção por headers. Se não tocar, é porque o navegador bloqueia requisições customizadas.")
+                st.code(headers_str)
+            
             url = clean_url
 
         # Usa o player correto para cada tipo de mídia.
-        # O parâmetro 'key' força o Streamlit a recriar o componente quando a URL muda, parando o áudio anterior.
         if media_type == 'music':
-            st.audio(url, autoplay=True, key=f"audio_{url}")
             st.audio(url, autoplay=True)
         else:
-            st.video(url, autoplay=True, key=f"video_{url}")
             st.video(url, autoplay=True)
         
         # Se for link do Google Drive, oferece opções de fallback (Iframe e Aviso de Permissão)
@@ -850,35 +517,41 @@ if st.session_state.history:
             if col2.button(clean_text, key=f"btn_{idx}", use_container_width=True):
                 # --- Verifica se o item é uma pasta ou um arquivo para tocar ---
                 if not item.get('isFolder'):
-                    # --- ARQUIVO/STREAM PARA TOCAR ---
-                    # Extrai os metadados do 'listitem' que a ponte do Kodi nos envia
-                    listitem = item.get('listitem')
-                    media_info = {}
-                    
-                    if listitem:
-                        info = getattr(listitem, 'info', {}).copy()
-                        art = getattr(listitem, 'art', {}).copy()
-                        item_type = getattr(listitem, 'media_type', 'video')
-                        
-                        if 'title' not in info:
-                            info['title'] = listitem.getLabel()
-                        
-                        media_info = {
-                            "title": info.get('title'),
-                            "artist": info.get('artist'),
-                            "plot": info.get('plot'),
-                            "icon": art.get('icon') or art.get('thumb'),
-                            "type": item_type
-                        }
+                    # Se for um plugin, tratamos como navegação para permitir resolução ou ações
+                    if item['url'].startswith("plugin://"):
+                        if not item['url'].startswith("resume:"):
+                            st.session_state.history.append((item['url'], clean_text))
+                        navigate_to(item['url'], clean_text)
                     else:
-                        media_info = {"title": clean_text, "type": "video"}
+                        # --- ARQUIVO/STREAM DIRETO ---
+                        # Extrai os metadados do 'listitem' que a ponte do Kodi nos envia
+                        listitem = item.get('listitem')
+                        media_info = {}
+                        
+                        if listitem:
+                            info = getattr(listitem, 'info', {}).copy()
+                            art = getattr(listitem, 'art', {}).copy()
+                            item_type = getattr(listitem, 'media_type', 'video')
+                            
+                            if 'title' not in info:
+                                info['title'] = listitem.getLabel()
+                            
+                            media_info = {
+                                "title": info.get('title'),
+                                "artist": info.get('artist'),
+                                "plot": info.get('plot'),
+                                "icon": art.get('icon') or art.get('thumb'),
+                                "type": item_type
+                            }
+                        else:
+                            media_info = {"title": clean_text, "type": "video"}
 
-                    # Define o estado de pré-visualização para mostrar a tela de "play"
-                    st.session_state.preview_media = {
-                        "resolved_url": item['url'],
-                        "media_info": media_info
-                    }
-                    st.session_state.video_url = item['url']
+                        # Define o estado de pré-visualização para mostrar a tela de "play"
+                        st.session_state.preview_media = {
+                            "resolved_url": item['url'],
+                            "media_info": media_info
+                        }
+                        st.session_state.video_url = item['url']
                 else:
                     # --- PASTA ---
                     new_url = item['url']
