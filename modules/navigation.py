@@ -192,20 +192,23 @@ def navigate_to(url, label="Home", dialog_answers=None):
             # Verifica se é um Repositório (prioridade para navegação se for repo)
             addon_xml = os.path.join(plugin_path, 'addon.xml')
             is_repo = False
+            has_executable = False
             if os.path.exists(addon_xml):
                 try:
                     tree = ET.parse(addon_xml)
                     root = tree.getroot()
                     for ext in root.findall('extension'):
-                        if ext.get('point') == 'xbmc.addon.repository':
+                        point = ext.get('point')
+                        if point == 'xbmc.addon.repository':
                             is_repo = True
-                            break
+                        elif point in ['xbmc.python.pluginsource', 'xbmc.python.script']:
+                            has_executable = True
                 except:
                     pass
             
             # Se for repositório e não tivermos parâmetros específicos (navegação raiz),
             # forçamos o modo de navegação de repositório em vez de executar o script.
-            if is_repo and (not "?" in url):
+            if is_repo and not has_executable and (not "?" in url):
                 entry_point = None 
             else:
                 # Tenta encontrar o entry point (script principal)
