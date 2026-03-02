@@ -434,6 +434,27 @@ if st.session_state.history:
                     
                     url = clean_url
 
+                # --- Diagnóstico de Link (MixDrop e Status) ---
+                if not url.startswith("magnet:") and "youtube.com" not in url:
+                    # Aviso MixDrop/MxContent
+                    if any(x in url for x in ["mixdrop", "mxcontent"]):
+                         st.warning("⚠️ **MixDrop Detectado:** Este servidor frequentemente bloqueia players web. Se falhar, use o 'Player Externo'.")
+
+                    # Verifica se o link está acessível
+                    try:
+                        import requests
+                        # Timeout curto para não travar a UI
+                        r_check = requests.head(url, timeout=2, verify=False)
+                        if r_check.status_code >= 400:
+                             r_check = requests.get(url, stream=True, timeout=2, verify=False)
+                             r_check.close()
+                        
+                        if r_check.status_code >= 400:
+                            st.error(f"⚠️ **Link Quebrado ou Bloqueado** (Erro {r_check.status_code})")
+                            st.caption(f"O servidor retornou erro. Tente recarregar o plugin ou usar o player externo.")
+                    except Exception as e:
+                        print(f"Erro ao verificar link: {e}")
+
                 # --- Lógica de Playlist para Streams (Plugins) ---
                 st.session_state.current_playlist = []
                 st.session_state.current_playlist_index = -1
@@ -508,7 +529,10 @@ if st.session_state.history:
                     st.markdown("👉 **Solução:** Use o link abaixo no VLC ou permita 'Conteúdo Inseguro' nas configurações do site no navegador.")
 
                 # 5. Link Externo
-                with st.expander("📺 Player Externo / Link Direto", expanded=False):
+                # Expande automaticamente se for um link problemático (MixDrop) ou tiver headers (que o navegador ignora)
+                auto_expand = "mixdrop" in final_url_for_player or "mxcontent" in final_url_for_player or bool(headers_for_player)
+                
+                with st.expander("📺 Player Externo / Link Direto", expanded=auto_expand):
                     st.write("Se não tocar no navegador, copie o link abaixo e use no **VLC**, **MPV** ou **PotPlayer**.")
                     if headers_for_player:
                         st.code(f'{final_url_for_player}|{headers_for_player}', language="text")
@@ -574,7 +598,9 @@ if st.session_state.history:
                         print(f"Erro ao criar playlist local: {e}")
 
                 # 2. Player
-                if media_type == 'music':
+                if is_local and not os.path.exists(url):
+                    st.error(f"Arquivo local não encontrado: {url}")
+                elif media_type == 'music':
                     st.audio(url, autoplay=True)
                 else:
                     st.video(url, autoplay=True)
@@ -708,8 +734,10 @@ if st.session_state.history:
     with st.expander("📂 Navegador de Arquivos", expanded=not is_viewing_content):
             
         if not items:
+            if st.session_state.dialog_heading:
+                st.warning("⚠️ O plugin abriu um menu de seleção vazio. Isso geralmente indica que ele não conseguiu encontrar opções (ex: links ou idiomas) no site de origem.")
             # Se a URL atual existe, a pasta está realmente vazia.
-            if st.session_state.current_url:
+            elif st.session_state.current_url:
                     st.info(f"Esta pasta está vazia.\nURL: {st.session_state.current_url}")
             # Se não há URL, significa que a navegação inicial falhou.
             else:

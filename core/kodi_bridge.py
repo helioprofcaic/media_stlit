@@ -15,13 +15,13 @@ _local = threading.local()
 # Lock global para garantir execução atômica de plugins (protege sys.argv e sys.modules)
 _plugin_lock = threading.Lock()
 
-class DialogSelectError(Exception):
+class DialogSelectError(BaseException):
     """Exceção lançada quando o plugin solicita uma seleção do usuário."""
     def __init__(self, heading, options):
         self.heading = heading
         self.options = options
 
-class DialogInputError(Exception):
+class DialogInputError(BaseException):
     """Exceção lançada quando o plugin solicita texto do usuário."""
     def __init__(self, heading, default):
         self.heading = heading
@@ -204,6 +204,11 @@ class MockXBMC:
             match = re.search(r'System\.HasAddon\(([^)]+)\)', condition)
             if match:
                 addon_id = match.group(1)
+                # Mapeamentos comuns de scripts para módulos mockados
+                if addon_id == 'script.module.resolveurl' and 'resolveurl' in sys.modules: return True
+                if addon_id == 'script.module.urlresolver' and 'urlresolver' in sys.modules: return True
+                if addon_id == 'script.module.inputstreamhelper' and 'inputstreamhelper' in sys.modules: return True
+
                 # Retorna True se estiver nos mocks ou instalado
                 if addon_id in sys.modules or os.path.exists(os.path.join(ADDONS_DIR, addon_id)):
                     return True
@@ -230,7 +235,7 @@ class MockXBMC:
 
     @staticmethod
     def getUserAgent():
-        return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
     @staticmethod
     def getRegion(id):
@@ -402,19 +407,27 @@ class MockXBMCGUI:
             return True
 
         def select(self, heading, list):
-            print(f"[DIALOG SELECT] {heading}")
+            count = len(list) if list else 0
+            print(f"[DIALOG SELECT] {heading} (Options: {count})")
+            
             if hasattr(_local, 'dialog_answers') and _local.dialog_answers:
                 return _local.dialog_answers.pop(0)
-            if list:
-                raise DialogSelectError(heading, list)
-            return -1
+            
+            # Cria a exceção e salva no local storage caso o plugin a capture silenciosamente
+            exc = DialogSelectError(heading, list if list else [])
+            _local.pending_dialog = exc
+            
+            raise exc
 
         def input(self, heading, default="", type=1, option=0, password=False):
             print(f"[DIALOG INPUT] {heading}")
             if hasattr(_local, 'dialog_answers') and _local.dialog_answers:
                 return _local.dialog_answers.pop(0)
-            # Interrompe para pedir input ao usuário
-            raise DialogInputError(heading, default)
+            
+            exc = DialogInputError(heading, default)
+            _local.pending_dialog = exc
+            
+            raise exc
             
     class DialogProgress:
         def create(self, heading, message=""): pass
@@ -435,9 +448,9 @@ class MockXBMCGUI:
             props = get_window_props()
             val = props.get(f"{self.id}_{key}", "")
             if not val:
-                 # Heurística defensiva: se não tem valor e não parece texto, retorna "0"
+                 # Heurística defensiva: se não tem valor e parece numérico, retorna "0"
                  key_lower = key.lower()
-                 if not any(x in key_lower for x in ['name', 'label', 'title', 'path', 'icon', 'thumb', 'art']):
+                 if any(x in key_lower for x in ['count', 'index', 'time', 'duration', 'progress', 'id', 'number']):
                      return "0"
             return val
         def setProperty(self, key, value):
@@ -1026,6 +1039,10 @@ def run_plugin(plugin_path, param_string="", dialog_answers=None):
     with _plugin_lock:
         setup_mocks()
         
+        # Limpa estado de diálogos pendentes da execução anterior
+        if hasattr(_local, 'pending_dialog'):
+            del _local.pending_dialog
+        
         # Injeta respostas de diálogos se houver (para retomar execução)
         _local.dialog_answers = list(dialog_answers) if dialog_answers else []
         
@@ -1228,6 +1245,11 @@ def run_plugin(plugin_path, param_string="", dialog_answers=None):
                 if arg.startswith('?'):
                     arg = arg[1:]
                 module.router(arg)
+            
+            # Verifica se houve um diálogo pendente que foi engolido pelo plugin
+            # Isso acontece se o plugin usar try...except genérico ao chamar dialog.select()
+            if hasattr(_local, 'pending_dialog') and _local.pending_dialog:
+                raise _local.pending_dialog
                 
         except DialogSelectError as e:
             print(f"[BRIDGE] Interrompido para seleção: {e.heading}")
@@ -1235,6 +1257,7 @@ def run_plugin(plugin_path, param_string="", dialog_answers=None):
                 "items": [
                     {
                         "label": f"{item}",
+                        "label": item.getLabel() if hasattr(item, 'getLabel') else str(item),
                         "url": f"resume:select:{i}",
                         "isFolder": False,
                         "art": {"icon": "https://upload.wikimedia.org/wikipedia/commons/thumb/e/e4/Infobox_info_icon.svg/1024px-Infobox_info_icon.svg.png"}
