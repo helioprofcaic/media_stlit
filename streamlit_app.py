@@ -20,6 +20,7 @@ from core.utils import PLUGINS_REPO_DIR, ADDONS_DIR
 from modules.utils import remove_kodi_formatting
 from modules.drive_sync import sync_drive_plugins, sync_local_plugins
 from modules.navigation import navigate_to, go_back
+from core.services import check_and_start_services
 
 st.set_page_config(page_title="Streamlit Media Player", layout="wide")
 
@@ -46,10 +47,19 @@ if 'dialog_heading' not in st.session_state:
     st.session_state.dialog_heading = None # Armazena título do diálogo de seleção
 if 'pending_action_url' not in st.session_state:
     st.session_state.pending_action_url = None # Armazena a URL que gerou o diálogo (para retomar)
+if 'adult_unlocked' not in st.session_state:
+    st.session_state.adult_unlocked = False # Controle de acesso adulto
+if 'password_required' not in st.session_state:
+    st.session_state.password_required = False # Flag para exibir diálogo de senha
+if 'active_plugin_url' not in st.session_state:
+    st.session_state.active_plugin_url = None # Armazena a URL original do plugin para playlist
 if 'local_sync_done' not in st.session_state:
     # Garante que plugins padrão estejam em data/addons na primeira execução
     sync_local_plugins()
     st.session_state.local_sync_done = True
+    
+    # Inicia serviços em background (ex: servidor do repositório Elementum)
+    check_and_start_services()
 
 
 # --- Interface ---
@@ -121,6 +131,33 @@ with col_header_2:
         
         st.divider()
         st.warning("🚫 **Não conecta?**\n\n1. Verifique se o celular está no **mesmo Wi-Fi**.\n2. O **Firewall do Windows** pode estar bloqueando. Tente desativá-lo temporariamente para testar.")
+
+# --- Diálogo de Senha (Conteúdo Adulto) ---
+if st.session_state.password_required:
+    with st.container(border=True):
+        st.warning("🔒 Conteúdo Protegido")
+        st.write("Este plugin contém material adulto. Digite a senha para continuar.")
+        with st.form(key='password_form'):
+            password = st.text_input("Senha:", type="password")
+            c1, c2 = st.columns([1, 5])
+            with c1:
+                submit = st.form_submit_button("Desbloquear", type="primary", use_container_width=True)
+            
+            if submit:
+                # Senha padrão: 6969 (pode ser alterada no secrets.toml com 'adult_password = "..."')
+                correct_pass = st.secrets.get("adult_password", "6969")
+                if password == str(correct_pass):
+                    st.session_state.adult_unlocked = True
+                    st.session_state.password_required = False
+                    # Retoma a navegação
+                    url = st.session_state.get('pending_password_url')
+                    label = st.session_state.get('pending_password_label')
+                    if url:
+                        navigate_to(url, label)
+                    st.rerun()
+                else:
+                    st.error("Senha incorreta.")
+    st.stop()
 
 # --- Diálogo de Input (Teclado Virtual) ---
 if st.session_state.input_dialog:
@@ -219,7 +256,7 @@ with st.sidebar:
                         selected_name = next((p['name'] for p in cat_plugins if p['id'] == selected_id), selected_id)
                         start_url = f"plugin://{selected_id}/"
                         st.session_state.history = [(start_url, selected_name)]
-                        navigate_to(start_url)
+                        navigate_to(start_url, selected_name)
 
     elif source_mode == "Google Drive":
         if st.button("📂 Carregar Drive"):
@@ -333,220 +370,330 @@ if st.session_state.history:
 # --- 2. Área de Reprodução e Pré-visualização ---
 
 # Caso A: Player Ativo
-if st.session_state.get('video_url'):
-    url = st.session_state.video_url
-    
-    # Identifica o tipo de conteúdo para separar a lógica
-    is_local = not url.startswith("http")
-    is_gdrive = "drive.google.com" in url
-    is_stream = not is_local and not is_gdrive
-    
-    if is_stream:
-        # ==================================================
-        # CAMINHO 1: PLAYER DE STREAM (PLUGINS / IPTV)
-        # ==================================================
-        with st.container(border=True):
-            # 1. Metadados
-            display_title = "Reproduzindo Stream"
-            icon = "📡"
-            media_type = 'video'
-            
-            if st.session_state.get('preview_media'):
-                info = st.session_state.preview_media.get('media_info', {})
-                if info.get('title'):
-                    display_title = remove_kodi_formatting(info['title'])
-                    if info.get('artist'):
-                        display_title = f"{remove_kodi_formatting(info['artist'])} - {display_title}"
-                media_type = info.get('type', 'video')
-                if media_type == 'music': icon = "🎵"
-            
-            st.subheader(f"{icon} {display_title}")
-            
-            # 2. Tratamento de URL (Headers e Redirects)
-            final_url_for_player = url
-            headers_for_player = ""
-            clean_url = url
-            
-            if "|" in url:
-                clean_url = url.split("|")[0]
-                headers_str = url.split("|")[1]
-                final_url_for_player = clean_url
-                headers_for_player = headers_str
-                
-                # Resolução de Redirects (Blogger/Google)
-                try:
-                    headers = {}
-                    for h in headers_str.split('&'):
-                        if '=' in h:
-                            k, v = h.split('=', 1)
-                            headers[urllib.parse.unquote(k)] = urllib.parse.unquote(v)
-                    
-                    if headers:
-                        import requests
-                        import urllib3
-                        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-                        r = requests.get(clean_url, headers=headers, allow_redirects=False, stream=True, timeout=5, verify=False)
-                        if r.status_code in [301, 302, 303, 307, 308] and 'Location' in r.headers:
-                            clean_url = r.headers['Location']
-                except Exception as e:
-                    print(f"Falha ao resolver URL protegida: {e}")
-
-                with st.expander("⚠️ Informações de Proteção (Headers)", expanded=False):
-                    st.warning("Este vídeo usa proteção por headers. Se não tocar, é porque o navegador bloqueia requisições customizadas.")
-                    st.code(headers_str)
-                
-                url = clean_url
-
-            # 3. Player
-            if media_type == 'music':
-                st.audio(url, autoplay=True)
-            else:
-                st.video(url, autoplay=True)
-            
-            # 4. Diagnóstico de Mixed Content
-            is_https_env = "https://" in (st.secrets.get("media_player_drive", {}).get("public_url") or "") or "streamlit.app" in (st.secrets.get("media_player_drive", {}).get("public_url") or "")
-            if url.startswith("http://") and is_https_env:
-                 st.warning("⚠️ **Bloqueio de Conteúdo Misto (Mixed Content)**")
-                 st.caption("O vídeo é **HTTP** (inseguro) mas o site é **HTTPS**. O navegador bloqueou a reprodução.")
-                 st.markdown("👉 **Solução:** Use o link abaixo no VLC ou permita 'Conteúdo Inseguro' nas configurações do site no navegador.")
-
-            # 5. Link Externo
-            with st.expander("📺 Player Externo / Link Direto", expanded=False):
-                st.write("Se não tocar no navegador, copie o link abaixo e use no **VLC**, **MPV** ou **PotPlayer**.")
-                if headers_for_player:
-                    st.code(f'{final_url_for_player}|{headers_for_player}', language="text")
-                else:
-                    st.code(final_url_for_player, language="text")
-
-            # 6. Controles e QR Code
-            if st.button("⏹️ Parar Reprodução", use_container_width=True, key="stop_stream"):
-                st.session_state.video_url = None
-                st.rerun()
-                
-            with st.expander("📱 Assistir no Celular"):
-                qr_target = url
-                if "|" in qr_target: qr_target = qr_target.split("|")[0]
-                encoded_url = urllib.parse.quote(qr_target)
-                qr_api = f"https://api.qrserver.com/v1/create-qr-code/?size=200x200&data={encoded_url}"
-                c1, c2 = st.columns([1, 3])
-                c1.image(qr_api, width=150)
-                c2.info("Escaneie para abrir o vídeo no celular.")
-                c2.code(qr_target, language="text")
-
-    else:
-        # ==================================================
-        # CAMINHO 2: PLAYER DE ARQUIVO (LOCAL / DRIVE)
-        # ==================================================
-        with st.container(border=True):
-            # 1. Metadados
-            display_title = "Reproduzindo Arquivo"
-            icon = "📂"
-            if is_gdrive: icon = "☁️"
-            media_type = 'video'
-
-            if st.session_state.get('preview_media'):
-                info = st.session_state.preview_media.get('media_info', {})
-                if info.get('title'):
-                    display_title = remove_kodi_formatting(info['title'])
-                media_type = info.get('type', 'video')
-                if media_type == 'music': icon = "🎵"
-            
-            st.subheader(f"{icon} {display_title}")
-            
-            # 2. Player
-            if media_type == 'music':
-                st.audio(url, autoplay=True)
-            else:
-                st.video(url, autoplay=True)
-            
-            # 3. Fallbacks do Drive
-            if is_gdrive:
-                with st.expander("🆘 O vídeo não toca? (Opções do Drive)", expanded=False):
-                    st.info("1. Para o player acima funcionar, o arquivo deve estar como **'Qualquer pessoa com o link'**.")
-                    st.info("2. Arquivos **MKV/AVI** não tocam no player padrão. Use o Player Nativo abaixo:")
-                    
-                    if "id=" in url:
-                        f_id = url.split("id=")[-1].split("&")[0]
-                        st.markdown(f"### 📽️ Player Nativo (Transcodificado)")
-                        iframe_html = f'<iframe src="https://drive.google.com/file/d/{f_id}/preview" width="100%" height="480" style="border:none; border-radius:10px;" allow="autoplay; fullscreen"></iframe>'
-                        st.markdown(iframe_html, unsafe_allow_html=True)
-
-            # 4. Controles e QR Code
-            if st.button("⏹️ Parar Reprodução", use_container_width=True, key="stop_file"):
-                st.session_state.video_url = None
-                st.rerun()
-            
-            if not is_local:
-                with st.expander("📱 Assistir no Celular"):
-                    encoded_url = urllib.parse.quote(url)
-                    qr_api = f"https://api.qrserver.com/v1/create-qr-code/?size=200x200&data={encoded_url}"
-                    c1, c2 = st.columns([1, 3])
-                    c1.image(qr_api, width=150)
-                    c2.info("Escaneie para abrir o vídeo no celular.")
-                    c2.code(url, language="text")
-            else:
-                st.info("ℹ️ Arquivo local. QR Code indisponível.")
-
-# Caso B: Pré-visualização (Item Selecionado)
-elif st.session_state.get('preview_media'):
-    media = st.session_state.preview_media
-    with st.container(border=True):
-        info = media.get('media_info', {})
+    if st.session_state.get('video_url'):
+        url = st.session_state.video_url
         
-        col_prev_1, col_prev_2 = st.columns([1, 3])
-        with col_prev_1:
-            icon_url = info.get('icon') or "https://upload.wikimedia.org/wikipedia/commons/thumb/2/21/Speaker_Icon.svg/1024px-Speaker_Icon.svg.png"
-            if icon_url.startswith("http") or os.path.exists(icon_url):
-                st.image(icon_url, width=100)
-            else:
-                st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/2/21/Speaker_Icon.svg/1024px-Speaker_Icon.svg.png", width=100)
+        # Identifica o tipo de conteúdo para separar a lógica
+        is_local = not url.startswith("http")
+        is_gdrive = "drive.google.com" in url
+        is_stream = not is_local and not is_gdrive
+        
+        if is_stream:
+            # ==================================================
+            # CAMINHO 1: PLAYER DE STREAM (PLUGINS / IPTV)
+            # ==================================================
+            with st.container(border=True):
+                # 1. Metadados
+                display_title = "Reproduzindo Stream"
+                icon = "📡"
+                media_type = 'video'
                 
-        with col_prev_2:
-            title = remove_kodi_formatting(info.get('title', 'Pronto para reproduzir'))
-            media_type = info.get('type', 'video')
-            
-            icon = "🎬" # default video
-            if media_type == 'music':
-                icon = "🎵"
-            elif media_type == 'picture':
-                icon = "🖼️"
-            
-            st.markdown(f"### {icon} {title}")
-            
-            if info.get('artist'):
-                st.write(f"**Artista:** {remove_kodi_formatting(info['artist'])}")
-            if info.get('plot'):
-                st.caption(remove_kodi_formatting(info['plot']))
-            elif not info:
-                st.write("O arquivo foi resolvido e está pronto.")
-            
-            if st.button("▶️ INICIAR REPRODUÇÃO", type="primary", use_container_width=True):
-                st.session_state.video_url = media["resolved_url"]
-                st.session_state.video_drm = media.get("drm_info")
-                st.rerun()
-            
-            if st.button("Cancelar", use_container_width=True):
-                st.session_state.preview_media = None
-                st.rerun()
-            
-            with st.expander("📱 Assistir no Celular"):
-                media_url = media["resolved_url"]
-                qr_target = media_url
-                if "|" in qr_target:
-                    qr_target = qr_target.split("|")[0]
+                if st.session_state.get('preview_media'):
+                    info = st.session_state.preview_media.get('media_info', {})
+                    if info.get('title'):
+                        display_title = remove_kodi_formatting(info['title'])
+                        if info.get('artist'):
+                            display_title = f"{remove_kodi_formatting(info['artist'])} - {display_title}"
+                    media_type = info.get('type', 'video')
+                    if media_type == 'music': icon = "🎵"
                 
-                if qr_target and qr_target.startswith("http"):
+                st.subheader(f"{icon} {display_title}")
+                
+                # 2. Tratamento de URL (Headers e Redirects)
+                final_url_for_player = url
+                headers_for_player = ""
+                clean_url = url
+                
+                if "|" in url:
+                    clean_url = url.split("|")[0]
+                    headers_str = url.split("|")[1]
+                    final_url_for_player = clean_url
+                    headers_for_player = headers_str
+                    
+                    # Resolução de Redirects (Blogger/Google)
+                    try:
+                        headers = {}
+                        for h in headers_str.split('&'):
+                            if '=' in h:
+                                k, v = h.split('=', 1)
+                                headers[urllib.parse.unquote(k)] = urllib.parse.unquote(v)
+                        
+                        if headers:
+                            import requests
+                            import urllib3
+                            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+                            r = requests.get(clean_url, headers=headers, allow_redirects=False, stream=True, timeout=5, verify=False)
+                            if r.status_code in [301, 302, 303, 307, 308] and 'Location' in r.headers:
+                                clean_url = r.headers['Location']
+                    except Exception as e:
+                        print(f"Falha ao resolver URL protegida: {e}")
+
+                    with st.expander("⚠️ Informações de Proteção (Headers)", expanded=False):
+                        st.warning("Este vídeo usa proteção por headers. Se não tocar, é porque o navegador bloqueia requisições customizadas.")
+                        st.code(headers_str)
+                    
+                    url = clean_url
+
+                # --- Lógica de Playlist para Streams (Plugins) ---
+                st.session_state.current_playlist = []
+                st.session_state.current_playlist_index = -1
+                
+                # Tenta criar playlist a partir dos itens da pasta atual (vindo de um plugin)
+                if st.session_state.get('current_items'):
+                    # Filtra apenas itens que não são pastas
+                    playlist_items = [item for item in st.session_state.current_items if not item.get('isFolder')]
+                    
+                    if playlist_items:
+                        st.session_state.current_playlist = playlist_items
+                        
+                        # Encontra o índice do item atual na playlist
+                        # Compara URLs sem os headers para garantir o match
+                        current_url_no_headers = url.split('|')[0]
+                        
+                        # Tenta usar a URL original do plugin se disponível (para casos onde video_url é resolvido)
+                        target_url = st.session_state.get('active_plugin_url', current_url_no_headers)
+                        
+                        for i, item in enumerate(playlist_items):
+                            item_url_no_headers = item['url'].split('|')[0]
+                            if item_url_no_headers == target_url or item_url_no_headers == current_url_no_headers:
+                                st.session_state.current_playlist_index = i
+                                break
+
+                # 3. Player
+                if url.startswith("magnet:"):
+                    st.warning("🧲 Links Magnet (Torrent) não são suportados nativamente pelo navegador.")
+                    st.info("O plugin retornou um link magnético em vez de um stream de vídeo. Isso pode indicar que o motor de torrent (Elementum/TorrServer) não iniciou corretamente.")
+                    st.code(url, language="text")
+                elif "youtube.com/playlist" in url:
+                    # Player Embed para Playlists do YouTube
+                    try:
+                        pl_id = url.split("list=")[-1].split("&")[0]
+                        iframe_html = f'<iframe width="100%" height="480" src="https://www.youtube.com/embed/videoseries?list={pl_id}" frameborder="0" allow="autoplay; encrypted-media" allowfullscreen></iframe>'
+                        st.markdown(iframe_html, unsafe_allow_html=True)
+                    except:
+                        st.error("Erro ao carregar playlist.")
+                elif media_type == 'music':
+                    st.audio(url, autoplay=True)
+                else:
+                    st.video(url, autoplay=True)
+                
+                # --- Botões de Navegação da Playlist (Stream) ---
+                if st.session_state.get('current_playlist') and st.session_state.current_playlist_index != -1:
+                    idx = st.session_state.current_playlist_index
+                    total = len(st.session_state.current_playlist)
+                    
+                    st.caption(f"Na playlist: {idx + 1} de {total}")
+                    
+                    col_prev, col_next = st.columns(2)
+                    
+                    with col_prev:
+                        if st.button("⏮️ Anterior", use_container_width=True, disabled=(idx <= 0)):
+                            next_item = st.session_state.current_playlist[idx - 1]
+                            # Usa navigate_to para resolver plugins corretamente
+                            navigate_to(next_item['url'], next_item['label'])
+                            st.rerun()
+                    
+                    with col_next:
+                        if st.button("Próxima ⏭️", use_container_width=True, disabled=(idx >= total - 1)):
+                            next_item = st.session_state.current_playlist[idx + 1]
+                            # Usa navigate_to para resolver plugins corretamente
+                            navigate_to(next_item['url'], next_item['label'])
+                            st.rerun()
+
+                # 4. Diagnóstico de Mixed Content
+                is_https_env = "https://" in (st.secrets.get("media_player_drive", {}).get("public_url") or "") or "streamlit.app" in (st.secrets.get("media_player_drive", {}).get("public_url") or "")
+                if url.startswith("http://") and is_https_env:
+                    st.warning("⚠️ **Bloqueio de Conteúdo Misto (Mixed Content)**")
+                    st.caption("O vídeo é **HTTP** (inseguro) mas o site é **HTTPS**. O navegador bloqueou a reprodução.")
+                    st.markdown("👉 **Solução:** Use o link abaixo no VLC ou permita 'Conteúdo Inseguro' nas configurações do site no navegador.")
+
+                # 5. Link Externo
+                with st.expander("📺 Player Externo / Link Direto", expanded=False):
+                    st.write("Se não tocar no navegador, copie o link abaixo e use no **VLC**, **MPV** ou **PotPlayer**.")
+                    if headers_for_player:
+                        st.code(f'{final_url_for_player}|{headers_for_player}', language="text")
+                    else:
+                        st.code(final_url_for_player, language="text")
+
+                # 6. Controles e QR Code
+                if st.button("⏹️ Parar Reprodução", use_container_width=True, key="stop_stream"):
+                    st.session_state.video_url = None
+                    st.rerun()
+                    
+                with st.expander("📱 Assistir no Celular"):
+                    qr_target = url
+                    if "|" in qr_target: qr_target = qr_target.split("|")[0]
                     encoded_url = urllib.parse.quote(qr_target)
                     qr_api = f"https://api.qrserver.com/v1/create-qr-code/?size=200x200&data={encoded_url}"
                     c1, c2 = st.columns([1, 3])
                     c1.image(qr_api, width=150)
                     c2.info("Escaneie para abrir o vídeo no celular.")
                     c2.code(qr_target, language="text")
-                else:
-                    st.warning("Arquivo local. Não acessível via QR Code.")
 
+        else:
+            # ==================================================
+            # CAMINHO 2: PLAYER DE ARQUIVO (LOCAL / DRIVE)
+            # ==================================================
+            with st.container(border=True):
+                # 1. Metadados
+                display_title = "Reproduzindo Arquivo"
+                icon = "📂"
+                if is_gdrive: icon = "☁️"
+                media_type = 'video'
+
+                if st.session_state.get('preview_media'):
+                    info = st.session_state.preview_media.get('media_info', {})
+                    if info.get('title'):
+                        display_title = remove_kodi_formatting(info['title'])
+                    media_type = info.get('type', 'video')
+                    if media_type == 'music': icon = "🎵"
+                
+                st.subheader(f"{icon} {display_title}")
+                
+                # --- Lógica de Playlist para Arquivos Locais ---
+                st.session_state.current_playlist = []
+                st.session_state.current_playlist_index = -1
+
+                if is_local:
+                    try:
+                        current_file_path = urllib.parse.unquote(url)
+                        directory = os.path.dirname(current_file_path)
+                        
+                        # Lista todos os arquivos de mídia suportados na pasta
+                        media_files = sorted([
+                            f for f in os.listdir(directory) 
+                            if f.lower().endswith(('.mp4', '.mkv', '.avi', '.mov', '.mp3', '.wav', '.flac', '.ogg', '.m4a'))
+                        ])
+                        
+                        st.session_state.current_playlist = [os.path.join(directory, f) for f in media_files]
+                        
+                        # Encontra o índice do arquivo atual
+                        if current_file_path in st.session_state.current_playlist:
+                            st.session_state.current_playlist_index = st.session_state.current_playlist.index(current_file_path)
+                    except Exception as e:
+                        print(f"Erro ao criar playlist local: {e}")
+
+                # 2. Player
+                if media_type == 'music':
+                    st.audio(url, autoplay=True)
+                else:
+                    st.video(url, autoplay=True)
+                
+                # --- Botões de Navegação da Playlist ---
+                if st.session_state.get('current_playlist') and st.session_state.current_playlist_index != -1:
+                    idx = st.session_state.current_playlist_index
+                    total = len(st.session_state.current_playlist)
+                    
+                    st.caption(f"Na playlist: {idx + 1} de {total}")
+                    
+                    col_prev, col_next = st.columns(2)
+                    
+                    with col_prev:
+                        # Botão Anterior (desabilitado se for o primeiro)
+                        if st.button("⏮️ Anterior", use_container_width=True, disabled=(idx <= 0)):
+                            next_url = st.session_state.current_playlist[idx - 1]
+                            st.session_state.video_url = next_url
+                            if st.session_state.preview_media:
+                                st.session_state.preview_media['resolved_url'] = next_url
+                                st.session_state.preview_media['media_info']['title'] = os.path.basename(next_url)
+                            st.rerun()
+                    
+                    with col_next:
+                        # Botão Próximo (desabilitado se for o último)
+                        if st.button("Próxima ⏭️", use_container_width=True, disabled=(idx >= total - 1)):
+                            next_url = st.session_state.current_playlist[idx + 1]
+                            st.session_state.video_url = next_url
+                            if st.session_state.preview_media:
+                                st.session_state.preview_media['resolved_url'] = next_url
+                                st.session_state.preview_media['media_info']['title'] = os.path.basename(next_url)
+                            st.rerun()
+
+                # 3. Fallbacks do Drive
+                if is_gdrive:
+                    with st.expander("🆘 O vídeo não toca? (Opções do Drive)", expanded=False):
+                        st.info("1. Para o player acima funcionar, o arquivo deve estar como **'Qualquer pessoa com o link'**.")
+                        st.info("2. Arquivos **MKV/AVI** não tocam no player padrão. Use o Player Nativo abaixo:")
+                        
+                        if "id=" in url:
+                            f_id = url.split("id=")[-1].split("&")[0]
+                            st.markdown(f"### 📽️ Player Nativo (Transcodificado)")
+                            iframe_html = f'<iframe src="https://drive.google.com/file/d/{f_id}/preview" width="100%" height="480" style="border:none; border-radius:10px;" allow="autoplay; fullscreen"></iframe>'
+                            st.markdown(iframe_html, unsafe_allow_html=True)
+
+                # 4. Controles e QR Code
+                if st.button("⏹️ Parar Reprodução", use_container_width=True, key="stop_file"):
+                    st.session_state.video_url = None
+                    st.rerun()
+                
+                if not is_local:
+                    with st.expander("📱 Assistir no Celular"):
+                        encoded_url = urllib.parse.quote(url)
+                        qr_api = f"https://api.qrserver.com/v1/create-qr-code/?size=200x200&data={encoded_url}"
+                        c1, c2 = st.columns([1, 3])
+                        c1.image(qr_api, width=150)
+                        c2.info("Escaneie para abrir o vídeo no celular.")
+                        c2.code(url, language="text")
+                else:
+                    st.info("ℹ️ Arquivo local. QR Code indisponível.")
+
+    # Caso B: Pré-visualização (Item Selecionado)
+    elif st.session_state.get('preview_media'):
+        media = st.session_state.preview_media
+        with st.container(border=True):
+            info = media.get('media_info', {})
+            
+            col_prev_1, col_prev_2 = st.columns([1, 3])
+            with col_prev_1:
+                icon_url = info.get('icon') or "https://upload.wikimedia.org/wikipedia/commons/thumb/2/21/Speaker_Icon.svg/1024px-Speaker_Icon.svg.png"
+                if icon_url.startswith("http") or os.path.exists(icon_url):
+                    st.image(icon_url, width=100)
+                else:
+                    st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/2/21/Speaker_Icon.svg/1024px-Speaker_Icon.svg.png", width=100)
+                    
+            with col_prev_2:
+                title = remove_kodi_formatting(info.get('title', 'Pronto para reproduzir'))
+                media_type = info.get('type', 'video')
+                
+                icon = "🎬" # default video
+                if media_type == 'music':
+                    icon = "🎵"
+                elif media_type == 'picture':
+                    icon = "🖼️"
+                
+                st.markdown(f"### {icon} {title}")
+                
+                if info.get('artist'):
+                    st.write(f"**Artista:** {remove_kodi_formatting(info['artist'])}")
+                if info.get('plot'):
+                    st.caption(remove_kodi_formatting(info['plot']))
+                elif not info:
+                    st.write("O arquivo foi resolvido e está pronto.")
+                
+                if st.button("▶️ INICIAR REPRODUÇÃO", type="primary", use_container_width=True):
+                    st.session_state.video_url = media["resolved_url"]
+                    st.session_state.video_drm = media.get("drm_info")
+                    st.rerun()
+                
+                if st.button("Cancelar", use_container_width=True):
+                    st.session_state.preview_media = None
+                    st.rerun()
+                
+                with st.expander("📱 Assistir no Celular"):
+                    media_url = media["resolved_url"]
+                    qr_target = media_url
+                    if "|" in qr_target:
+                        qr_target = qr_target.split("|")[0]
+                    
+                    if qr_target and qr_target.startswith("http"):
+                        encoded_url = urllib.parse.quote(qr_target)
+                        qr_api = f"https://api.qrserver.com/v1/create-qr-code/?size=200x200&data={encoded_url}"
+                        c1, c2 = st.columns([1, 3])
+                        c1.image(qr_api, width=150)
+                        c2.info("Escaneie para abrir o vídeo no celular.")
+                        c2.code(qr_target, language="text")
+                    else:
+                        st.warning("Arquivo local. Não acessível via QR Code.")
 # --- 3. Navegador de Arquivos (Expansível) ---
-if st.session_state.history:
     items = st.session_state.current_items
     # Fecha a lista se estiver vendo vídeo ou preview para focar no conteúdo
     is_viewing_content = (st.session_state.get('video_url') is not None) or (st.session_state.get('preview_media') is not None)
@@ -588,8 +735,8 @@ if st.session_state.history:
                 # --- Verifica se o item é uma pasta ou um arquivo para tocar ---
                 if not item.get('isFolder'):
                     # Se for um plugin, tratamos como navegação para permitir resolução ou ações
-                    if item['url'].startswith("plugin://") or item['url'].startswith("resume:"):
-                        if not item['url'].startswith("resume:"):
+                    if item['url'].startswith("plugin://") or item['url'].startswith("resume:") or item['url'].startswith("install://"):
+                        if not item['url'].startswith("resume:") and not item['url'].startswith("install://"):
                             st.session_state.history.append((item['url'], clean_text))
                         navigate_to(item['url'], clean_text)
                     else:
@@ -696,7 +843,7 @@ else:
                 if st.button(plugin['name'], key=f"home_plugin_{plugin['id']}", use_container_width=True):
                     start_url = f"plugin://{plugin['id']}/"
                     st.session_state.history = [(start_url, plugin['name'])]
-                    navigate_to(start_url)
+                    navigate_to(start_url, plugin['name'])
                     st.rerun()
     else:
         st.info("Nenhum plugin de mídia encontrado.")

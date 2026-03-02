@@ -3,12 +3,16 @@ import os
 import urllib.parse
 import xml.etree.ElementTree as ET
 import google_storage
+import gzip
+import io
+import re
 from core.kodi_bridge import run_plugin
 from core.utils import ADDONS_DIR, PLUGINS_REPO_DIR
 from modules.utils import install_dependencies
 
 def navigate_to(url, label="Home", dialog_answers=None):
     """Executa o plugin e atualiza o estado com os novos itens."""
+    print(f"[NAV] Navigating to: {url} (Label: {label})")
     
     # --- Atualiza Histórico Recente (Home) ---
     if url and label and label != "Home" and not url.startswith("resume:") and not url.startswith("install://"):
@@ -47,7 +51,7 @@ def navigate_to(url, label="Home", dialog_answers=None):
                 return
 
             with st.spinner(f"Baixando e instalando {name}..."):
-                import requests, zipfile, io
+                import requests, zipfile
                 headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
                 r = requests.get(zip_url, headers=headers, timeout=60)
                 r.raise_for_status()
@@ -114,13 +118,68 @@ def navigate_to(url, label="Home", dialog_answers=None):
 
     # Se for plugin://, executa via bridge
     if url.startswith("plugin://"):
-        # Limpa itens atuais preventivamente para evitar "fantasma" da interface antiga
-        # se o carregamento falhar ou demorar.
-        st.session_state.current_items = []
         
         try:
             # Identifica o caminho físico do plugin
             plugin_id = url.replace("plugin://", "").split("/")[0]
+            
+            # --- PROTEÇÃO DE CONTEÚDO ADULTO ---
+            restricted_keywords = ['erome', 'xvideos', 'tube8', 'pornhub', 'brazzers', 'adult', 'xxx', 'sex', '18+']
+            if any(k in plugin_id.lower() for k in restricted_keywords):
+                if not st.session_state.get('adult_unlocked', False):
+                    st.session_state.password_required = True
+                    st.session_state.pending_password_url = url
+                    st.session_state.pending_password_label = label
+                    st.rerun()
+                    return
+            # -----------------------------------
+
+            # --- FALLBACK YOUTUBE (Se não instalado) ---
+            if plugin_id == "plugin.video.youtube":
+                is_installed = os.path.exists(os.path.join(ADDONS_DIR, plugin_id)) or \
+                               os.path.exists(os.path.join(PLUGINS_REPO_DIR, plugin_id))
+                if not is_installed:
+                    print(f"[NAV] YouTube plugin missing. Handling URL natively: {url}")
+                    
+                    # Extrai ID de vídeo
+                    # Padrões: /play/?video_id=ID, /?action=play_video&videoid=ID
+                    match_vid = re.search(r'(?:video_id|videoid)=([^&]+)', url)
+                    if match_vid:
+                        video_id = match_vid.group(1)
+                        yt_url = f"https://www.youtube.com/watch?v={video_id}"
+                        st.session_state.preview_media = {
+                            "resolved_url": yt_url,
+                            "media_info": {"title": label, "type": "video", "icon": "https://upload.wikimedia.org/wikipedia/commons/thumb/0/09/YouTube_full-color_icon_%282017%29.svg/256px-YouTube_full-color_icon_%282017%29.svg.png"}
+                        }
+                        st.session_state.video_url = yt_url
+                        return
+
+                    # Extrai ID de Playlist
+                    # Padrão: /playlist/ID/
+                    path_from_url = urllib.parse.urlparse(url).path
+                    match_pl = re.search(r'/playlist/([^/]+)', path_from_url)
+                    if match_pl:
+                        pl_id = match_pl.group(1)
+                        
+                        # Define URL padrão de playlist do YouTube para o player reconhecer
+                        yt_pl_url = f"https://www.youtube.com/playlist?list={pl_id}"
+                        
+                        st.session_state.preview_media = {
+                            "resolved_url": yt_pl_url,
+                            "media_info": {"title": label, "type": "video", "icon": "https://upload.wikimedia.org/wikipedia/commons/thumb/0/09/YouTube_full-color_icon_%282017%29.svg/256px-YouTube_full-color_icon_%282017%29.svg.png"}
+                        }
+                        st.session_state.video_url = yt_pl_url
+                        
+                        # Adiciona um item na lista para permitir reabrir caso o player seja fechado
+                        st.session_state.current_url = url
+                        st.session_state.current_items = [{
+                            'label': f"▶️ (Re)abrir Playlist: {label}",
+                            'url': url,
+                            'isFolder': False,
+                            'art': {'icon': 'https://upload.wikimedia.org/wikipedia/commons/thumb/0/09/YouTube_full-color_icon_%282017%29.svg/256px-YouTube_full-color_icon_%282017%29.svg.png'}
+                        }]
+                        return
+            # -------------------------------------------
             
             # Procura em addons instalados ou pasta de desenvolvimento
             plugin_path = os.path.join(ADDONS_DIR, plugin_id)
@@ -130,12 +189,53 @@ def navigate_to(url, label="Home", dialog_answers=None):
             # Verifica e instala dependências antes de executar
             install_dependencies(plugin_path)
             
-            entry_point = os.path.join(plugin_path, "main.py")
-            if not os.path.exists(entry_point):
-                # Tenta default.py se main.py não existir
-                entry_point = os.path.join(plugin_path, "default.py")
+            # Verifica se é um Repositório (prioridade para navegação se for repo)
+            addon_xml = os.path.join(plugin_path, 'addon.xml')
+            is_repo = False
+            if os.path.exists(addon_xml):
+                try:
+                    tree = ET.parse(addon_xml)
+                    root = tree.getroot()
+                    for ext in root.findall('extension'):
+                        if ext.get('point') == 'xbmc.addon.repository':
+                            is_repo = True
+                            break
+                except:
+                    pass
             
-            if os.path.exists(entry_point):
+            # Se for repositório e não tivermos parâmetros específicos (navegação raiz),
+            # forçamos o modo de navegação de repositório em vez de executar o script.
+            if is_repo and (not "?" in url):
+                entry_point = None 
+            else:
+                # Tenta encontrar o entry point (script principal)
+                entry_point = None
+                
+                # 1. Tenta ler do addon.xml
+                if os.path.exists(addon_xml):
+                    try:
+                        tree = ET.parse(addon_xml)
+                        root = tree.getroot()
+                        for ext in root.findall('extension'):
+                            if ext.get('point') in ['xbmc.python.pluginsource', 'xbmc.python.script']:
+                                lib = ext.get('library')
+                                if lib:
+                                    candidate = os.path.join(plugin_path, lib)
+                                    if os.path.exists(candidate):
+                                        entry_point = candidate
+                                        break
+                    except:
+                        pass
+                
+                # 2. Fallback para nomes padrão
+                if not entry_point:
+                    for name in ["main.py", "default.py", "plugin.py", "addon.py"]:
+                        candidate = os.path.join(plugin_path, name)
+                        if os.path.exists(candidate):
+                            entry_point = candidate
+                            break
+            
+            if entry_point and os.path.exists(entry_point):
                 # Executa a ponte
                 # Extrai parâmetros da URL
                 params = url
@@ -163,23 +263,64 @@ def navigate_to(url, label="Home", dialog_answers=None):
                     return
 
                 if result.get("resolved_url"):
+                    r_url = result["resolved_url"]
+                    
+                    # Se a URL resolvida for outro comando de plugin, executa recursivamente
+                    if r_url.startswith("plugin://"):
+                        # Fix para links Elementum com magnet não codificado (quebra se tiver &)
+                        if "plugin.video.elementum" in r_url and "uri=magnet" in r_url and "uri=magnet%3A" not in r_url:
+                             try:
+                                 if "?" in r_url:
+                                     base, query = r_url.split('?', 1)
+                                     # Tenta capturar o magnet link bruto usando Regex para não quebrar nos & internos
+                                     match = re.search(r'uri=(magnet:[^&]+)', query)
+                                     if match:
+                                         magnet = match.group(1)
+                                         encoded_magnet = urllib.parse.quote(magnet)
+                                         r_url = r_url.replace(magnet, encoded_magnet)
+                                         print(f"[FIX] URL Elementum corrigida: {r_url}")
+                             except Exception as e:
+                                 print(f"Erro ao corrigir URL Elementum: {e}")
+
+                        # Evita loop infinito se for igual à URL atual
+                        print(f"[NAV] Redirecting to plugin URL: {r_url}")
+
+                        if r_url != url:
+                            navigate_to(r_url, label, None)
+                            return
+                    
+                    # Se for um link Magnet, tenta repassar para o Elementum
+                    if r_url.startswith("magnet:"):
+                        # Verifica se o Elementum está instalado
+                        if os.path.exists(os.path.join(ADDONS_DIR, "plugin.video.elementum")):
+                            st.toast("🧲 Redirecionando para Elementum...")
+                            elementum_url = f"plugin://plugin.video.elementum/play?uri={urllib.parse.quote(r_url)}"
+                            navigate_to(elementum_url, label, dialog_answers)
+                            return
+
                     # É um vídeo para tocar
                     # Define preview e inicia reprodução direta (Autoplay)
                     st.session_state.preview_media = result
-                    st.session_state.video_url = result["resolved_url"]
+                    st.session_state.video_url = r_url
+                    st.session_state.active_plugin_url = url # Salva URL original para playlist
                     # Limpa pendência
                     if 'pending_action_url' in st.session_state: del st.session_state.pending_action_url
                 else:
                     # É um diretório
-                    st.session_state.current_items = result["items"]
+                    items = result.get("items", [])
+                    if not items and not result.get("error"):
+                         if "elementum" in url:
+                             st.warning("O Elementum não retornou dados. Verifique se o serviço/binário está rodando.")
+                             print(f"[NAV] Elementum returned no data for URL: {url}")
+                    
+                    st.session_state.current_items = items
                     st.session_state.current_url = url
                     st.session_state.video_url = None # Limpa vídeo anterior
+                    st.session_state.active_plugin_url = None
                     # Limpa pendência
                     if 'pending_action_url' in st.session_state: del st.session_state.pending_action_url
             else:
                 # Tenta verificar se é um Repositório (que não tem main.py)
-                addon_xml = os.path.join(plugin_path, 'addon.xml')
-                is_repo = False
                 if os.path.exists(addon_xml):
                     try:
                         tree = ET.parse(addon_xml)
@@ -209,7 +350,16 @@ def navigate_to(url, label="Home", dialog_answers=None):
                                             r = requests.get(info_url, headers=headers, timeout=15)
                                             r.raise_for_status()
                                             
-                                            remote_root = ET.fromstring(r.content)
+                                            content = r.content
+                                            # Suporte a repositórios compactados (.gz)
+                                            if info_url.endswith('.gz') or content[:2] == b'\x1f\x8b':
+                                                try:
+                                                    with gzip.GzipFile(fileobj=io.BytesIO(content)) as gz:
+                                                        content = gz.read()
+                                                except Exception as e:
+                                                    print(f"Aviso: Falha ao descompactar GZ: {e}")
+
+                                            remote_root = ET.fromstring(content)
                                             repo_items = []
                                             for addon in remote_root.findall('addon'):
                                                 a_id = addon.get('id')
@@ -237,7 +387,11 @@ def navigate_to(url, label="Home", dialog_answers=None):
                                             st.session_state.current_url = url
                                             return
                     except Exception as e:
-                        st.warning(f"Erro ao ler repositório: {e}")
+                        if "127.0.0.1" in str(e) or "localhost" in str(e):
+                            st.warning(f"⚠️ Falha ao conectar ao serviço local do repositório ({plugin_id}).")
+                            st.info("Este repositório requer que um serviço de fundo (daemon) esteja rodando na sua máquina para funcionar. Em ambientes web/simulados, isso geralmente não é suportado automaticamente.")
+                        else:
+                            st.error(f"Erro ao ler repositório: {e}")
                 
                 if not is_repo:
                     st.error(f"Plugin não encontrado em: {plugin_path}")
@@ -253,4 +407,7 @@ def go_back():
         st.session_state.history = []
         st.session_state.current_items = []
         st.session_state.current_url = None
+        st.session_state.active_plugin_url = None
     st.session_state.preview_media = None
+    
+    print("[NAV] Going back to previous page.")

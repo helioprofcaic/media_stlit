@@ -51,6 +51,10 @@ def register_metadata_callback(callback):
     global _metadata_callback
     _metadata_callback = callback
 
+def set_current_addon_id(addon_id):
+    """Define o ID do addon atual para a thread corrente."""
+    _local.current_addon_id = addon_id
+
 def get_playlists():
     if not hasattr(_local, 'playlists'):
         _local.playlists = {0: [], 1: []} # 0: Music, 1: Video
@@ -99,6 +103,7 @@ class MockListItem:
 
 class MockXBMC:
     LOGDEBUG, LOGINFO, LOGNOTICE, LOGWARNING, LOGERROR, LOGFATAL, LOGNONE = range(7)
+    SERVER_JSONRPCSERVER = None  # Add this line
     PLAYLIST_VIDEO = 1
     PLAYLIST_MUSIC = 0
     ENGLISH_NAME = 2
@@ -112,13 +117,29 @@ class MockXBMC:
     @staticmethod
     def executebuiltin(function):
         print(f"[KODI EXEC] {function}")
+        # Suporte a PlayMedia(url) - Usado por alguns plugins para forçar reprodução
+        if function.lower().startswith("playmedia("):
+            try:
+                # Extrai a URL: PlayMedia(url) ou PlayMedia("url")
+                content = function[10:-1]
+                if content.startswith('"') and content.endswith('"'):
+                    content = content[1:-1]
+                
+                # Salva como URL resolvida para o player pegar
+                data = get_bridge_data()
+                data["resolved_url"] = content
+                print(f"[KODI EXEC] PlayMedia capturado: {content}")
+            except:
+                pass
 
     @staticmethod
     def executeJSONRPC(json_rpc):
         # Simulação básica para evitar crashes em plugins que buscam info do addon
         try:
             req = json.loads(json_rpc)
-            if "Addons.GetAddonDetails" in req.get("method", ""):
+            method = req.get("method", "")
+            
+            if "Addons.GetAddonDetails" in method:
                 return json.dumps({
                     "result": {
                         "addon": {
@@ -126,6 +147,14 @@ class MockXBMC:
                             "version": "1.0.0",
                             "enabled": True
                         }
+                    }
+                })
+            
+            if "Application.GetProperties" in method:
+                return json.dumps({
+                    "result": {
+                        "name": "Kodi",
+                        "version": {"major": 19, "minor": 0, "tag": "stable", "revision": "20210218-f44fdfbf67"},
                     }
                 })
         except:
@@ -162,6 +191,12 @@ class MockXBMC:
     def getCondVisibility(condition):
         if 'inputstream.adaptive' in condition:
             return True
+        
+        import platform
+        sys_plat = platform.system().lower()
+        if 'System.Platform.Windows' in condition: return 'windows' in sys_plat
+        if 'System.Platform.Linux' in condition: return 'linux' in sys_plat
+        if 'System.Platform.OSX' in condition: return 'darwin' in sys_plat
         if 'System.Platform.Android' in condition:
             return False
         if 'System.HasAddon' in condition:
@@ -200,6 +235,14 @@ class MockXBMC:
     @staticmethod
     def getRegion(id):
         return "BR"
+        
+    @staticmethod
+    def startServer(id, wait):
+        return True
+
+    @staticmethod
+    def getLocalizedString(id):
+        return str(id)
 
     class Keyboard:
         def __init__(self, default='', heading='', hidden=False):
@@ -256,6 +299,10 @@ class MockXBMC:
                         target_url = entry['url']
                         target_listitem = entry['listitem'] or target_listitem
                         print(f"[KODI PLAYER] Resolvido da Playlist ({item}): {target_url}")
+            
+            # Se a URL estiver vazia mas tivermos um listitem, tenta pegar o caminho dele
+            if not target_url and target_listitem:
+                target_url = target_listitem.getPath()
 
             # Salva a URL para o VideoPlayer pegar via bridge_data
             data = get_bridge_data()
@@ -589,6 +636,8 @@ class MockXBMCVFS:
              path = path.replace("special://profile", os.path.join(DATA_DIR, "userdata"))
         elif path.startswith("special://temp"):
              path = path.replace("special://temp", os.path.join(DATA_DIR, "temp"))
+        elif path.startswith("special://logpath"):
+             path = path.replace("special://logpath", DATA_DIR)
         elif path.startswith("special://"):
              path = path.replace("special://", os.path.join(DATA_DIR, ""))
         
@@ -785,8 +834,10 @@ class MockXBMCAddon:
         def __init__(self, id=None):
             self.id = id
             if not self.id:
+                if hasattr(_local, 'current_addon_id') and _local.current_addon_id:
+                    self.id = _local.current_addon_id
                 # Tenta deduzir o ID do addon pelo sys.argv (URL do plugin)
-                if len(sys.argv) > 0 and sys.argv[0].startswith("plugin://"):
+                elif len(sys.argv) > 0 and sys.argv[0].startswith("plugin://"):
                     self.id = sys.argv[0].replace("plugin://", "").strip("/")
                 else:
                     self.id = "unknown"
@@ -846,7 +897,15 @@ class MockXBMCAddon:
                 return str(self._settings[id])
 
             # Retorna valores padrão seguros para evitar erros de conversão (int/bool)
-            if 'port' in id: return "8080"
+            if 'port' in id: 
+                # Elementum Repo usa porta 65223 por padrão no addon.xml
+                if self.id == 'repository.elementumorg': return "65223"
+                if self.id == 'plugin.video.elementum': 
+                    # A porta principal de comunicação do plugin é a JSON-RPC (65221).
+                    # A porta HTTP (65220) é usada para o streaming final.
+                    if 'http' in id.lower() or 'stream' in id.lower(): return "65220"
+                    return "65221" # Default to JSON-RPC port
+                return "8080"
             if 'whitelist' in id: return "false"
             if 'mpd' in id: return "false"
             
@@ -855,23 +914,30 @@ class MockXBMCAddon:
             id_lower = id.lower()
             
             if 'timeout' in id_lower:
-                return "10" # Reduzido de 60 para 10 para falhar mais rápido
+                return "20" # Reduzido de 60 para 10 para falhar mais rápido
             
             if any(x in id_lower for x in ['cache', 'buffer']):
                 return "100"
 
             if any(x in id_lower for x in ['limit', 'count', 'items', 'page', 'time', 'duration', 'width', 'height', 'cache', 'buffer', 'port', 'num', 'max', 'min', 'size', 'interval', 'timeout', 'level', 'bitrate', 'view', 'mode', 'depth', 'current', 'total', 'progress']):
-                return "10"
+                return "20"
             
-            if any(x in id_lower for x in ['enable', 'show', 'use', 'hide', 'active', 'auto']):
+            if any(x in id_lower for x in ['enable', 'show', 'use', 'hide', 'active', 'auto', 'local_only_client']):
                 return "true"
             
             # Silencia warnings para configurações comuns de plugins BR
-            if any(x in id_lower for x in ['opt', 'extra', 'layout', 'pass', 'favoritos', 'epg', 'pais', 'player', 'ffmpeg']):
+            if any(x in id_lower for x in ['opt', 'extra', 'layout', 'favoritos', 'player', 'ffmpeg']):
                 return "0"
+                
+            # Configurações específicas do Elementum
+            if id == 'remote_host': return "127.0.0.1"
+            if id == 'binary_platform': 
+                import platform
+                if platform.system() == 'Windows': return "windows_x64"
+                return "linux_x64"
 
             # Retorna string vazia para campos de texto/credenciais para evitar "0"
-            if any(x in id_lower for x in ['user', 'name', 'email', 'login', 'token', 'key', 'url', 'path', 'search', 'query']):
+            if any(x in id_lower for x in ['user', 'name', 'email', 'login', 'token', 'key', 'url', 'path', 'search', 'query', 'pass', 'epg', 'pais', 'host']):
                 return ""
 
             print(f"[WARNING] getSetting('{id}') não encontrado. Retornando '0' como padrão para evitar crash.")
@@ -881,12 +947,27 @@ class MockXBMCAddon:
             self._settings[id] = value
             self._save_settings()
 
-        def getLocalizedString(self, id): return MockLocalizedString(str(id))
+        def getLocalizedString(self, id):
+            # Trata casos de inteiros e bytestrings
+            label = str(id) if not isinstance(id, str) else id
+            return MockLocalizedString(label)
 
 # --- Função Principal da Ponte ---
 
 def setup_mocks():
     """Injeta os módulos falsos no sistema para o plugin importar."""
+    
+    # Cria kodi.log dummy para plugins que fazem parsing de log (Elementum)
+    log_path = os.path.join(DATA_DIR, "kodi.log")
+    if not os.path.exists(log_path) or os.path.getsize(log_path) == 0:
+        try:
+            with open(log_path, "w", encoding="utf-8") as f:
+                f.write("NOTICE: Starting Kodi (19.0). Platform: Windows NT x86 64-bit\n")
+                f.flush()
+                os.fsync(f.fileno())
+        except:
+            pass
+
     # Atualiza sempre os módulos para evitar incompatibilidade de classes (reload do Streamlit)
     sys.modules['xbmc'] = MockXBMC
     sys.modules['xbmcgui'] = MockXBMCGUI
@@ -902,6 +983,17 @@ def setup_mocks():
     kodi_six.xbmcaddon = MockXBMCAddon
     kodi_six.xbmcvfs = MockXBMCVFS
     sys.modules['kodi_six'] = kodi_six
+    
+    # Mock para kodi_six.utils
+    if 'kodi_six.utils' not in sys.modules:
+        kodi_six_utils = type(sys)('kodi_six.utils')
+        # py2_decode é usado para garantir unicode em Py2, em Py3 str já é unicode
+        kodi_six_utils.py2_decode = lambda s: s.decode('utf-8') if isinstance(s, bytes) else s
+        kodi_six_utils.py2_encode = lambda s: s.encode('utf-8') if isinstance(s, str) else s
+        kodi_six_utils.PY2 = sys.version_info[0] == 2
+        kodi_six_utils.PY3 = sys.version_info[0] == 3
+        sys.modules['kodi_six.utils'] = kodi_six_utils
+        kodi_six.utils = kodi_six_utils
 
     if 'infotagger' not in sys.modules:
         infotagger = type(sys)('infotagger')
@@ -941,6 +1033,15 @@ def run_plugin(plugin_path, param_string="", dialog_answers=None):
         warnings.filterwarnings("ignore", message=".*urllib3.*doesn't match a supported version.*")
         warnings.filterwarnings("ignore", category=SyntaxWarning)
         
+        # --- Supressão de Erros de DLL no Windows (Bad Image Callbacks) ---
+        if sys.platform == 'win32':
+            try:
+                import ctypes
+                # SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX
+                ctypes.windll.kernel32.SetErrorMode(0x0001 | 0x0002 | 0x8000)
+            except:
+                pass
+
         # Patch global no requests para evitar bloqueios (User-Agent)
         if 'requests' in sys.modules:
             import requests
@@ -965,23 +1066,58 @@ def run_plugin(plugin_path, param_string="", dialog_answers=None):
             del _local.data
         # get_bridge_data() recriará o dicionário limpo automaticamente na próxima chamada
         
+        # Verifica se é um script (xbmc.python.script) ou plugin (xbmc.python.pluginsource)
+        is_script = False
+        plugin_dir = os.path.dirname(plugin_path)
+        addon_xml_path = os.path.join(plugin_dir, 'addon.xml')
+        if os.path.exists(addon_xml_path):
+            try:
+                tree = ET.parse(addon_xml_path)
+                root = tree.getroot()
+                for ext in root.findall('extension'):
+                    if ext.get('point') == 'xbmc.python.script':
+                        # Verifica se o arquivo sendo executado é o script principal
+                        lib = ext.get('library', 'default.py')
+                        if os.path.basename(plugin_path) == lib:
+                            is_script = True
+                            break
+            except:
+                pass
+        
         # Simula os argumentos que o Kodi passa (URL, Handle, Params)
-        # Separa a URL base dos parâmetros se necessário
-        if '?' in param_string:
-            base_url, query = param_string.split('?', 1)
-            # Garante que a query string comece com ? para sys.argv[2]
-            query_string = "?" + query if not query.startswith("?") else query
-            sys.argv = [base_url, "1", query_string]
+        if is_script:
+            # Scripts recebem argumentos diretamente: [script_path, arg1, arg2...]
+            sys.argv = [plugin_path]
+            if param_string:
+                # Remove '?' inicial se houver, pois scripts geralmente recebem args limpos ou query string completa
+                sys.argv.append(param_string)
         else:
-            # Se não tem ?, assume que é apenas a URL base ou apenas parâmetros antigos
-            if param_string.startswith("plugin://"):
-                sys.argv = [param_string, "1", ""]
+            # Plugins recebem: [url, handle, query_string]
+            if '?' in param_string:
+                base_url, query = param_string.split('?', 1)
+
+                # Adiciona o protocolo 'plugin://' se não estiver presente
+                if not base_url.startswith("plugin://"):
+                    base_url = "plugin://" + base_url
+
+                # Garante que a query string comece com '?'
+                query = "?" + query if not query.startswith("?") else query
+                query_string = "?" + query if not query.startswith("?") else query
+                sys.argv = [base_url, "1", query_string]
+            elif param_string.startswith("plugin://"):
+                # Garante barra final apenas se for a raiz (plugin://id)
+                # Se for um caminho (plugin://id/path), mantém original para não quebrar rotas
+                base = param_string
+                if param_string.count("/") == 2:
+                    base += "/"
+                sys.argv = [base, "1", ""]
             else:
                 # Fallback para comportamento antigo (apenas params)
                 sys.argv = ["plugin://bridge/", "1", param_string]
+
+        print(f"[BRIDGE] Run Plugin: {plugin_path} Args: {sys.argv}")
         
         # --- Configura sys.path para incluir bibliotecas do plugin ---
-        plugin_dir = os.path.dirname(plugin_path)
         paths_to_add = [plugin_dir]
         
         # Tenta encontrar a raiz do addon (onde está o addon.xml)
@@ -1001,11 +1137,23 @@ def run_plugin(plugin_path, param_string="", dialog_answers=None):
             if os.path.exists(lib_path) and lib_path not in paths_to_add:
                 paths_to_add.append(lib_path)
             
+            # Adiciona resources/site-packages se existir (comum em addons complexos como Elementum)
+            site_pkg = os.path.join(addon_root, 'resources', 'site-packages')
+            if os.path.exists(site_pkg) and site_pkg not in paths_to_add:
+                paths_to_add.append(site_pkg)
+            
             # Adiciona outras pastas comuns de bibliotecas (lib, modules)
             for folder in ['lib', 'modules', 'include']:
                 extra_lib = os.path.join(addon_root, folder)
                 if os.path.exists(extra_lib) and extra_lib not in paths_to_add:
                     paths_to_add.append(extra_lib)
+            
+            # --- Hack para Elementum/Platform Detect no Windows ---
+            if sys.platform == 'win32':
+                # Tenta encontrar e priorizar bibliotecas nativas do Windows x64
+                win64_lib = os.path.join(addon_root, 'resources', 'site-packages', 'platform_detect', 'libraries', 'windows_x64')
+                if os.path.exists(win64_lib) and win64_lib not in paths_to_add:
+                    paths_to_add.insert(0, win64_lib)
             
             # --- Resolve dependências (outros addons) ---
             # Tenta encontrar a pasta de addons pai para buscar dependências listadas no addon.xml
@@ -1030,7 +1178,19 @@ def run_plugin(plugin_path, param_string="", dialog_answers=None):
                     print(f"Aviso: Erro ao carregar dependências de {addon_root}: {e}")
 
         for p in paths_to_add:
-            if p not in sys.path:
+            # Filtra caminhos de outras plataformas para evitar conflitos de importação
+            # Ex: Evita adicionar .../lib/linux/ em ambiente Windows
+            p_norm = p.replace('\\', '/').lower()
+            if not p_norm.endswith('/'): p_norm += '/'
+            
+            if sys.platform == 'win32':
+                if any(x in p_norm for x in ['/linux/', '/android/', '/darwin/', '/osx/', '/ios/', '/tvos/']):
+                    continue
+            elif sys.platform.startswith('linux'):
+                if any(x in p_norm for x in ['/windows/', '/win32/', '/win64/', '/android/', '/darwin/', '/osx/']):
+                    continue
+
+            if p and p not in sys.path:
                 sys.path.insert(0, p)
         
         importlib.invalidate_caches()
@@ -1099,6 +1259,7 @@ def run_plugin(plugin_path, param_string="", dialog_answers=None):
         except Exception as e:
             print(f"Erro no Plugin: {e}")
             import traceback
+
             traceback.print_exc()
             # Adiciona o erro aos dados para exibir na interface
             data = get_bridge_data()

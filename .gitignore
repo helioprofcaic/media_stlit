@@ -15,6 +15,8 @@ env/
 # Dados Locais e Logs (Gerados em tempo de execução)
 data/
 docs/rascunhos.md
+plugin/plugin.video.tube8_explore/
+plugin/plugin.video.elementum/*
 *.log
 
 # Configurações de IDE

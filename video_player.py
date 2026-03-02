@@ -461,6 +461,18 @@ class VideoPlayer(QMainWindow):
 
         # Se o plugin retornou uma URL resolvida (vídeo direto)
         if data["resolved_url"]:
+            r_url = data["resolved_url"]
+            
+            # Suporte a recursividade (plugin chamando plugin)
+            if r_url.startswith("plugin://") and r_url != url:
+                self.run_plugin_action(r_url)
+                return
+                
+            # Suporte a Magnet Links (Redireciona para Elementum)
+            if r_url.startswith("magnet:"):
+                self.run_plugin_action(f"plugin://plugin.video.elementum/play?uri={urllib.parse.quote(r_url)}")
+                return
+
             # Verifica se há DRM
             if data.get("drm_info"):
                 drm = data["drm_info"]
