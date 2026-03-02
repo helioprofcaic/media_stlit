@@ -5,6 +5,7 @@ import xbmcplugin
 import requests
 import json
 import os
+import xbmc
 
 # URL da API (Radio Browser)
 BASE_API = "https://de1.api.radio-browser.info"
@@ -72,6 +73,36 @@ CUSTOM_STATIONS = [
     {"name": "DJ & CLUB CHARTS", "url": "https://breakz-2012-high.rautemusik.fm/?ref=rb-djclubcharts", "country": "DE", "image": "https://i.ibb.co/P7QHpGB/DJ-CLUB-CHARTS-LOGO.png"}
 ]
 
+def update_local_cache():
+    """Baixa e salva os dados mais recentes da API."""
+    if not os.path.exists(RESOURCES_DIR):
+        os.makedirs(RESOURCES_DIR)
+
+    updated = False
+    # 1. Países
+    try:
+        r = requests.get(f"{BASE_API}/json/countries", timeout=30)
+        r.raise_for_status()
+        with open(COUNTRIES_FILE, 'w', encoding='utf-8') as f:
+            json.dump(r.json(), f, ensure_ascii=False)
+        updated = True
+    except Exception as e:
+        xbmcgui.Dialog().notification("Erro", f"Falha ao baixar países: {e}")
+
+    # 2. Tags
+    try:
+        r = requests.get(f"{BASE_API}/json/tags", timeout=30)
+        r.raise_for_status()
+        with open(TAGS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(r.json(), f, ensure_ascii=False)
+        updated = True
+    except Exception as e:
+        xbmcgui.Dialog().notification("Erro", f"Falha ao baixar tags: {e}")
+
+    if updated:
+        xbmcgui.Dialog().notification("Sucesso", "Cache de dados atualizado.")
+    xbmcplugin.endOfDirectory(int(sys.argv[1]))
+
 def get_url(**kwargs):
     """Gera a URL interna do plugin com parâmetros."""
     return "{0}?{1}".format(sys.argv[0], urllib.parse.urlencode(kwargs))
@@ -101,6 +132,16 @@ def list_categories():
     # Estilos (Tags)
     li = xbmcgui.ListItem(label="🎸 Por Estilo (Rock, Pop, Jazz...)")
     url = get_url(action='tags')
+    xbmcplugin.addDirectoryItem(int(sys.argv[1]), url, li, isFolder=True)
+
+    # Tags por País
+    li = xbmcgui.ListItem(label="🌍 Por País (Ver Estilos)")
+    url = get_url(action='list_countries')
+    xbmcplugin.addDirectoryItem(int(sys.argv[1]), url, li, isFolder=True)
+
+    # Atualizar Cache
+    li = xbmcgui.ListItem(label="🔄 Atualizar Cache de Dados")
+    url = get_url(action='update_cache')
     xbmcplugin.addDirectoryItem(int(sys.argv[1]), url, li, isFolder=True)
 
     xbmcplugin.endOfDirectory(int(sys.argv[1]))
@@ -172,6 +213,71 @@ def fetch_stations(api_params):
     except Exception as e:
         xbmcgui.Dialog().notification("Erro", f"Falha na API: {str(e)}")
 
+def list_countries():
+    """Lista os países disponíveis no cache."""
+    try:
+        with open(COUNTRIES_FILE, 'r', encoding='utf-8') as f:
+            countries = json.load(f)
+        
+        countries.sort(key=lambda x: x['name'])
+
+        for country in countries:
+            if country['stationcount'] > 10:
+                label = f"{country['name']} ({country['stationcount']})"
+                li = xbmcgui.ListItem(label=label)
+                url = get_url(action='tags_by_country', country_code=country['iso_3166_1'], country_name=country['name'])
+                xbmcplugin.addDirectoryItem(int(sys.argv[1]), url, li, isFolder=True)
+
+        xbmcplugin.endOfDirectory(int(sys.argv[1]))
+    except FileNotFoundError:
+        xbmcgui.Dialog().notification("Erro", "Cache de países não encontrado. Atualize o cache.")
+        xbmcplugin.endOfDirectory(int(sys.argv[1]))
+    except Exception as e:
+        xbmcgui.Dialog().notification("Erro", f"Falha ao ler cache: {e}")
+        xbmcplugin.endOfDirectory(int(sys.argv[1]))
+
+def list_tags_for_country(country_code, country_name):
+    """Busca e lista as tags mais populares para um país específico."""
+    if not country_code: return
+
+    try:
+        params = {
+            'countrycode': country_code,
+            'hidebroken': 'true',
+            'limit': 150,
+            'order': 'clickcount',
+            'reverse': 'true'
+        }
+        r = requests.get(f"{API_URL}/search", params=params, timeout=15)
+        r.raise_for_status()
+        stations = r.json()
+
+        if not stations:
+            xbmcgui.Dialog().notification("Aviso", f"Nenhuma estação encontrada para {country_name}.")
+            xbmcplugin.endOfDirectory(int(sys.argv[1]))
+            return
+
+        tag_counts = {}
+        for station in stations:
+            tags = station.get('tags', '').split(',')
+            for tag in tags:
+                tag = tag.strip().lower()
+                if tag:
+                    tag_counts[tag] = tag_counts.get(tag, 0) + 1
+        
+        sorted_tags = sorted(tag_counts.items(), key=lambda item: item[1], reverse=True)
+
+        for tag, count in sorted_tags:
+            label = f"{tag.capitalize()} ({count} estações)"
+            li = xbmcgui.ListItem(label=label)
+            url = get_url(action='by_country_and_tag', country_code=country_code, tag=tag)
+            xbmcplugin.addDirectoryItem(int(sys.argv[1]), url, li, isFolder=True)
+
+        xbmcplugin.endOfDirectory(int(sys.argv[1]))
+    except Exception as e:
+        xbmcgui.Dialog().notification("Erro", f"Falha na API: {str(e)}")
+        xbmcplugin.endOfDirectory(int(sys.argv[1]))
+
 def router(args):
     """Roteador de URL do plugin."""
     params = dict(urllib.parse.parse_qsl(args))
@@ -183,14 +289,16 @@ def router(args):
         list_custom()
     elif action == 'list_countries':
         list_countries()
-    elif action == 'list_all_tags':
-        list_all_tags()
     elif action == 'update_cache':
         update_local_cache()
     elif action == 'country':
         fetch_stations({'country': params.get('country'), 'limit': 50})
     elif action == 'by_tag':
         fetch_stations({'tag': params.get('tag'), 'limit': 50})
+    elif action == 'tags_by_country':
+        list_tags_for_country(params.get('country_code'), params.get('country_name'))
+    elif action == 'by_country_and_tag':
+        fetch_stations({'countrycode': params.get('country_code'), 'tag': params.get('tag'), 'limit': 50})
     else:
         list_categories()
 
