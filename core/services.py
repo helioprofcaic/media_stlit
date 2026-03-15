@@ -89,7 +89,7 @@ def check_and_start_services():
     # Lista de addons conhecidos que precisam de serviço
     # No futuro, isso poderia ler todos os addon.xml
     known_services = [
-        'repository.elementumorg',
+        # 'repository.elementumorg', # Desativado para economizar recursos e evitar logs fantasmas
         # 'plugin.video.elementum' # Desativado o início automático. Será iniciado sob demanda pelo kodi_bridge.
     ]
     

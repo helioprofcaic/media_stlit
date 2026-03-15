@@ -8,6 +8,7 @@ import json
 import threading
 import re
 import warnings
+import logging
 from core.utils import ADDONS_DIR, DATA_DIR, PLUGINS_REPO_DIR, remove_kodi_formatting
 
 # Armazenamento local para thread (suporte a multiusuário no Streamlit)
@@ -1128,6 +1129,11 @@ def run_plugin(plugin_path, param_string="", dialog_answers=None):
         warnings.filterwarnings("ignore", message=".*urllib3.*doesn't match a supported version.*")
         warnings.filterwarnings("ignore", category=SyntaxWarning)
         
+        # Silencia logs verbosos de bibliotecas HTTP (requests/urllib3)
+        # Isso evita o spam de "Starting new HTTP connection" e "GET /hls/..." no terminal
+        logging.getLogger("urllib3").setLevel(logging.WARNING)
+        logging.getLogger("requests").setLevel(logging.WARNING)
+
         # --- Supressão de Erros de DLL no Windows (Bad Image Callbacks) ---
         if sys.platform == 'win32':
             try:
@@ -1141,6 +1147,7 @@ def run_plugin(plugin_path, param_string="", dialog_answers=None):
         if 'requests' in sys.modules:
             import requests
             from requests.adapters import HTTPAdapter
+            from urllib3.util.retry import Retry
             # Verifica se já foi patcheado para evitar duplicidade
             if not getattr(requests.Session, '_ua_patched', False):
                 _orig_init = requests.Session.__init__
@@ -1149,10 +1156,18 @@ def run_plugin(plugin_path, param_string="", dialog_answers=None):
                     # Define um User-Agent de navegador moderno
                     self.headers['User-Agent'] = MockXBMC.getUserAgent()
                     # Reduz retries para evitar travamentos longos (padrão é 3)
-                    adapter = HTTPAdapter(max_retries=0)
+                    # adapter = HTTPAdapter(max_retries=0)
                     self.mount("http://", adapter)
                     self.mount("https://", adapter)
-                
+                    # --- Estratégia de Retry Robusta ---
+                    # Para lidar com conexões instáveis de IPTV (erros 10053, 5xx, etc)
+                    retry_strategy = Retry(
+                        total=3, # Total de tentativas
+                        backoff_factor=0.3, # Atraso entre tentativas: {0.3s, 0.6s, 1.2s}
+                        status_forcelist=[429, 500, 502, 503, 504], # Retenta nestes erros de servidor
+                        allowed_methods=["HEAD", "GET", "OPTIONS"]
+                    )
+                    adapter = HTTPAdapter(max_retries=retry_strategy)
                 requests.Session.__init__ = _new_init
                 requests.Session._ua_patched = True
         
