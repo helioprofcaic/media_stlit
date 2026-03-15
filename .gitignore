@@ -17,6 +17,7 @@ data/
 docs/rascunhos.md
 plugin/plugin.video.tube8_explore/
 plugin/plugin.video.elementum/*
+plugin/plugin.video.xvideos_explore/
 *.log
 
 # Configurações de IDE

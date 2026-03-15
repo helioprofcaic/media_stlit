@@ -15,6 +15,7 @@ try:
                                  QPushButton, QListWidget, QListWidgetItem, QMessageBox, QInputDialog, QApplication)
     from PyQt6.QtCore import Qt
     HAS_QT = True
+    from core.update_addons_xml import fetch_and_update_addons_xml
 except ImportError:
     HAS_QT = False
     QDialog = object # Mock para herança não falhar
@@ -80,6 +81,10 @@ class RepositoryBrowser(QDialog):
         self.load_btn.clicked.connect(self.load_addons)
         repo_layout.addWidget(self.load_btn)
         layout.addLayout(repo_layout)
+
+        self.update_btn = QPushButton("Atualizar Addons.xml")
+        self.update_btn.clicked.connect(self.update_addons_xml)
+        layout.addWidget(self.update_btn)
         
         # Lista de Addons
         self.addons_list = QListWidget()
@@ -139,6 +144,21 @@ class RepositoryBrowser(QDialog):
                 url += '/'
             self.repo_combo.addItem(f"Custom: {url}", url)
             self.repo_combo.setCurrentIndex(self.repo_combo.count() - 1)
+
+    def update_addons_xml(self):
+        """Chama o script para atualizar os addons.xml locais a partir do repositório remoto."""
+        repo_url = self.repo_combo.currentData()
+        
+        # A função de atualização espera uma URL, não um caminho local
+        if not repo_url or os.path.isdir(repo_url):
+            QMessageBox.warning(self, "Ação Inválida", "Selecione um repositório remoto para poder usar esta função.")
+            return
+
+        self.status_label.setText(f"Atualizando addons a partir de {repo_url}...")
+        QApplication.processEvents()
+        fetch_and_update_addons_xml(repo_url, ADDONS_DIR)
+        self.status_label.setText("Processo de atualização concluído. Verifique o log.")
+        QMessageBox.information(self, "Concluído", "O script de atualização foi executado. Verifique o arquivo 'player.log' para detalhes.")
 
     def get_addons_list(self, repo_url):
         """Método desacoplado da UI para obter addons de uma URL."""

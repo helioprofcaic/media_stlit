@@ -2,6 +2,7 @@ import os
 import datetime
 import json
 import sys
+import re
 import subprocess
 
 # --- Configuração de Dados e Logs (Memória do Player) ---
@@ -32,6 +33,16 @@ def log_to_file(msg):
             f.write(f"[{timestamp}] {msg}\n")
     except Exception:
         pass
+
+def remove_kodi_formatting(text):
+    """Remove as tags de formatação do Kodi ([B], [COLOR], etc.) de uma string."""
+    if not isinstance(text, str):
+        return text
+    # Regex para remover tags como [B], [/B], [COLOR xxx], [/COLOR], [I], [/I] etc.
+    # A regex é case-insensitive.
+    # Adicionado \b para garantir que não pegue palavras que contenham as letras das tags.
+    clean_text = re.sub(r'\[/?(B|I|COLOR|UPPERCASE|LOWERCASE|CAPITALIZE|LIGHT|SUB|SUP|FADE|SCROLL|LEFT|RIGHT|CENTER|JUSTIFY|font|char|CR)\b[^\]]*\]', '', text, flags=re.IGNORECASE)
+    return clean_text
 
 def load_memory():
     """Carrega configurações salvas."""

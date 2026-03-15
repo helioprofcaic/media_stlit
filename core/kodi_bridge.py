@@ -3,11 +3,12 @@ import os
 import importlib.util
 import xml.etree.ElementTree as ET
 import shutil
+import urllib.parse
 import json
 import threading
 import re
 import warnings
-from core.utils import ADDONS_DIR, DATA_DIR, PLUGINS_REPO_DIR
+from core.utils import ADDONS_DIR, DATA_DIR, PLUGINS_REPO_DIR, remove_kodi_formatting
 
 # Armazenamento local para thread (suporte a multiusuário no Streamlit)
 _local = threading.local()
@@ -46,10 +47,16 @@ def get_window_props():
 
 # Callback global para atualizações de metadados em tempo real
 _metadata_callback = None
+_notification_callback = None
 
 def register_metadata_callback(callback):
     global _metadata_callback
     _metadata_callback = callback
+
+def register_notification_callback(callback):
+    """Registra um callback para ser chamado em notificações. O callback deve ser thread-safe."""
+    global _notification_callback
+    _notification_callback = callback
 
 def set_current_addon_id(addon_id):
     """Define o ID do addon atual para a thread corrente."""
@@ -326,6 +333,16 @@ class MockXBMC:
                     "icon": art.get('icon') or art.get('thumb'),
                     "type": getattr(target_listitem, 'media_type', 'video')
                 }
+            else:
+                # Fallback: Tenta obter metadados dos parâmetros originais da URL do plugin
+                params = getattr(_local, 'current_params', {})
+                if params:
+                    data["media_info"] = {
+                        "title": urllib.parse.unquote(params.get('title', '') or params.get('name', '')),
+                        "artist": urllib.parse.unquote(params.get('artist', '')),
+                        "icon": urllib.parse.unquote(params.get('icon', '') or params.get('thumb', '')),
+                        "type": params.get('type', 'video')
+                    }
 
         def stop(self):
             # Em um player real, pararia a reprodução. Aqui apenas limpamos o estado se necessário.
@@ -397,9 +414,24 @@ class MockXBMCGUI:
     class Dialog:
         def notification(self, heading, message, icon=None, time=5000, sound=True):
             print(f"[NOTIFICATION] {heading}: {message}")
+            global _notification_callback
+            if _notification_callback:
+                try:
+                    # O callback deve ser um sinal Qt que lida com a chamada entre threads
+                    _notification_callback(heading, message)
+                except Exception as e:
+                    print(f"Erro ao emitir notificação: {e}")
 
         def yesno(self, heading, line1, line2="", line3="", nolabel="No", yeslabel="Yes"):
             print(f"[DIALOG YESNO] {heading}: {line1} {line2} {line3}")
+
+            # --- Auto-deny donation requests ---
+            clean_text = remove_kodi_formatting(f"{heading} {line1}").lower()
+            donation_keywords = ["doação", "donation", "contribuir", "contribute", "ajudar", "apoiar"]
+            if any(keyword in clean_text for keyword in donation_keywords):
+                print("[BRIDGE] Auto-denying donation/support request.")
+                return False
+
             return True
 
         def ok(self, heading, line1, line2="", line3=""):
@@ -1037,6 +1069,14 @@ def setup_mocks():
 def run_plugin(plugin_path, param_string="", dialog_answers=None):
     """Executa o plugin e retorna os itens ou a URL resolvida."""
     with _plugin_lock:
+        # --- HOTFIX para URLs de categoria do Tube8 ---
+        # O site alterou /cat/ para /categories/, causando erro 404 em plugins antigos.
+        # Isto intercepta e corrige a URL antes de passá-la para o plugin.
+        if "tube8.com/cat/" in param_string:
+            param_string = param_string.replace("tube8.com/cat/", "tube8.com/categories/")
+            print(f"[BRIDGE HOTFIX] Corrigido URL do Tube8: {param_string}")
+        # ---------------------------------------------
+
         setup_mocks()
         
         # Limpa estado de diálogos pendentes da execução anterior
@@ -1046,6 +1086,14 @@ def run_plugin(plugin_path, param_string="", dialog_answers=None):
         # Injeta respostas de diálogos se houver (para retomar execução)
         _local.dialog_answers = list(dialog_answers) if dialog_answers else []
         
+        # Armazena os parâmetros da chamada para uso posterior (ex: metadados no Player)
+        _local.current_params = {}
+        if '?' in param_string:
+            try:
+                _local.current_params = dict(urllib.parse.parse_qsl(param_string.split('?', 1)[1]))
+            except:
+                pass
+
         # Suprime avisos de dependência do requests (comum em addons antigos)
         warnings.filterwarnings("ignore", message=".*urllib3.*doesn't match a supported version.*")
         warnings.filterwarnings("ignore", category=SyntaxWarning)

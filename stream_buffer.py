@@ -42,34 +42,53 @@ class StreamBuffer(QIODevice):
         if not requests or not self._session:
             return False
         try:
-            # 1. Tenta obter o tamanho via HEAD
-            try:
-                head_resp = self._session.head(self.url, headers=self.headers, allow_redirects=True, timeout=5)
-                if 'Content-Length' in head_resp.headers:
-                    self._data_size = int(head_resp.headers['Content-Length'])
-            except Exception as e:
-                print(f"HEAD falhou: {e}")
-                log_to_file(f"StreamBuffer HEAD falhou: {e}")
+            # Heurística para detectar live streams e pular a detecção de tamanho
+            is_live_stream = self.url.lower().endswith(('.flv', '.ts'))
 
-            # 2. Se falhou, tenta GET com Range 0-0 para obter Content-Range
-            if self._data_size == 0:
+            if not is_live_stream:
+                # 1. Tenta obter o tamanho via HEAD
                 try:
-                    headers_range = self.headers.copy()
-                    headers_range['Range'] = 'bytes=0-0'
-                    range_resp = self._session.get(self.url, headers=headers_range, timeout=5)
-                    if range_resp.status_code == 206:
-                        content_range = range_resp.headers.get('Content-Range', '')
-                        if '/' in content_range:
-                            self._data_size = int(content_range.split('/')[-1])
+                    head_resp = self._session.head(self.url, headers=self.headers, allow_redirects=True, timeout=5)
+                    if 'Content-Length' in head_resp.headers:
+                        self._data_size = int(head_resp.headers['Content-Length'])
                 except Exception as e:
-                    print(f"Range check falhou: {e}")
-                    log_to_file(f"StreamBuffer Range check falhou: {e}")
+                    print(f"HEAD falhou: {e}")
+                    log_to_file(f"StreamBuffer HEAD falhou: {e}")
+
+                # 2. Se falhou, tenta GET com Range 0-0 para obter Content-Range
+                if self._data_size == 0:
+                    try:
+                        headers_range = self.headers.copy()
+                        headers_range['Range'] = 'bytes=0-0'
+                        range_resp = self._session.get(self.url, headers=headers_range, timeout=5)
+                        if range_resp.status_code == 206:
+                            content_range = range_resp.headers.get('Content-Range', '')
+                            if '/' in content_range:
+                                self._data_size = int(content_range.split('/')[-1])
+                    except Exception as e:
+                        print(f"Range check falhou: {e}")
+                        log_to_file(f"StreamBuffer Range check falhou: {e}")
+            else:
+                self._data_size = 0 # Live streams são sequenciais e não têm tamanho definido
+                log_to_file(f"StreamBuffer: Live stream detectado ({self.url}), pulando detecção de tamanho.")
             
             print(f"StreamBuffer: Tamanho detectado: {self._data_size}")
             log_to_file(f"StreamBuffer: Tamanho detectado: {self._data_size}")
 
             # Inicia o stream do começo
             self._start_stream(0)
+
+            # Bloqueia até que o primeiro pedaço de dados chegue ou um erro ocorra.
+            # Isso é crucial para que o QMediaPlayer possa sondar o formato do stream corretamente.
+            with self._cond:
+                while not self._buffer and not self._error and not self._eof:
+                    if not self._cond.wait(timeout=10): # Timeout de 10s para conectar
+                        self._error = Exception("Timeout esperando pelo primeiro chunk de dados")
+                        break
+            
+            if self._error:
+                raise self._error
+
             return super().open(mode)
         except Exception as e:
             print(f"Erro ao abrir stream: {e}")

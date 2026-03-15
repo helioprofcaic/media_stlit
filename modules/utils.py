@@ -11,9 +11,13 @@ LOCAL_LIB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__f
 
 def remove_kodi_formatting(text):
     """Remove tags de formatação do Kodi ([B], [COLOR], etc)."""
-    if not text: return ""
-    # Remove tags como [B], [/B], [COLOR red], [CR], etc.
-    return re.sub(r'\[/?[A-Z]+(?: [^\]]+)?\]', '', text, flags=re.IGNORECASE)
+    if not isinstance(text, str):
+        return text
+    # Regex para remover tags como [B], [/B], [COLOR xxx], [/COLOR], [I], [/I] etc.
+    # A regex é case-insensitive.
+    # Adicionado \b para garantir que não pegue palavras que contenham as letras das tags.
+    clean_text = re.sub(r'\[/?(B|I|COLOR|UPPERCASE|LOWERCASE|CAPITALIZE|LIGHT|SUB|SUP|FADE|SCROLL|LEFT|RIGHT|CENTER|JUSTIFY|font|char|CR)\b[^\]]*\]', '', text, flags=re.IGNORECASE)
+    return clean_text
 
 def install_dependencies(plugin_path):
     """Lê o addon.xml e tenta instalar dependências Python via pip."""
