@@ -7,6 +7,14 @@ import json
 import random
 import os
 import time
+import re
+from io import BytesIO
+
+# Tenta importar google_storage do ambiente pai (Streamlit)
+try:
+    import google_storage
+except ImportError:
+    google_storage = None
 
 # Arquivo de cache para instâncias
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -48,6 +56,29 @@ FALLBACK_INSTANCES = [
     "https://vid.puffyan.us",
     "https://invidious.drgns.space",
     "https://inv.tux.pizza"
+]
+
+# Lista de Tópicos Sugeridos (Chips do YouTube)
+TOPICS_LIST = [
+    ("♾️ Tudo", "trending"), # Mapeia para Em Alta
+    ("🎙️ Podcasts", "Podcasts"),
+    ("🎵 Música", "Música"),
+    ("📰 Notícias", "Notícias"),
+    ("🗣️ Debates", "Debates"),
+    ("🤖 Inteligência artificial", "Inteligência artificial"),
+    ("🕹️ Década de 1980", "Década de 1980"),
+    ("🎛️ Mixes", "Music Mix"),
+    ("📜 Lista de reprodução", "Playlists"),
+    ("🔴 Ao vivo", "Ao vivo"),
+    ("💻 Sistema operacional", "Sistema operacional"),
+    ("📈 Economia", "Economia"),
+    ("👨‍💻 Engenharia de software", "Engenharia de software"),
+    ("🥁 Samba", "Samba"),
+    ("🧠 Teorias", "Teorias"),
+    ("zz Cálculo", "Cálculo"), # zz para ordenar se necessário, ou manter texto puro
+    ("☕ Chill out", "Chill out music"),
+    ("🆕 Enviados recentemente", "recent"), # Lógica customizada
+    ("✨ Novidades para você", "trending")
 ]
 
 def get_url(**kwargs):
@@ -211,6 +242,118 @@ def list_channels_by_category(category_id):
         xbmcplugin.addDirectoryItem(int(sys.argv[1]), url, li, isFolder=True)
     xbmcplugin.endOfDirectory(int(sys.argv[1]))
 
+def list_local_playlists():
+    """Lista arquivos .strm da pasta playlists local."""
+    # A pasta playlists está na raiz do projeto (dois níveis acima de plugin/plugin.video...)
+    # Como o streamlit roda da raiz, os.getcwd() geralmente é a raiz do projeto.
+    playlists_dir = os.path.join(os.getcwd(), 'playlists')
+    
+    if not os.path.exists(playlists_dir):
+        xbmcgui.Dialog().notification("Aviso", "Pasta 'playlists' não encontrada.")
+        return
+
+    try:
+        files = [f for f in os.listdir(playlists_dir) if f.lower().endswith('.strm')]
+    except Exception:
+        files = []
+    
+    if not files:
+        xbmcgui.Dialog().notification("Aviso", "Nenhum arquivo .strm encontrado.")
+        return
+
+    for f in files:
+        path = os.path.join(playlists_dir, f)
+        try:
+            with open(path, 'r', encoding='utf-8') as file:
+                content = file.read().strip()
+            
+            # Tenta extrair ID do YouTube (suporta v=ID, embed/ID, youtu.be/ID)
+            match = re.search(r'(?:v=|/)([0-9A-Za-z_-]{11})', content)
+            if match:
+                video_id = match.group(1)
+                title = os.path.splitext(f)[0]
+                
+                li = xbmcgui.ListItem(label=f"📄 {title}")
+                li.setInfo('video', {'title': title})
+                li.setArt({'icon': 'DefaultNetwork.png'})
+                
+                url = get_url(action='play', video_id=video_id)
+                xbmcplugin.addDirectoryItem(int(sys.argv[1]), url, li, isFolder=False)
+        except:
+            pass
+    
+    xbmcplugin.endOfDirectory(int(sys.argv[1]))
+
+def list_topics():
+    """Lista os tópicos sugeridos como se fossem pastas."""
+    for label, query in TOPICS_LIST:
+        li = xbmcgui.ListItem(label=label)
+        li.setArt({'icon': 'DefaultAddonSearch.png'})
+        
+        if query == "trending":
+            # Redireciona para a função existente de Trending
+            url = get_url(action='trending')
+        elif query == "recent":
+            # Busca genérica ordenada por data (simulação)
+            url = get_url(action='search_topic', query="Novidades", sort_by="date")
+        else:
+            # Busca normal pelo termo
+            url = get_url(action='search_topic', query=query)
+            
+        xbmcplugin.addDirectoryItem(int(sys.argv[1]), url, li, isFolder=True)
+    
+    xbmcplugin.endOfDirectory(int(sys.argv[1]))
+
+def search_topic(query, sort_by=None):
+    """Wrapper para realizar a busca de um tópico."""
+    params = {'q': query, 'type': 'video'}
+    if sort_by:
+        params['sort_by'] = sort_by
+    list_videos("/api/v1/search", params)
+
+def save_topic_to_drive(label, query):
+    """Cria um arquivo .strm com o link do tópico e envia para o Google Drive."""
+    if not google_storage:
+        xbmcgui.Dialog().notification("Erro", "Módulo Google Drive não disponível.")
+        return
+
+    # Limpa caracteres especiais do nome do arquivo
+    clean_name = re.sub(r'[^\w\s-]', '', label).strip()
+    filename = f"{clean_name}.strm"
+    
+    # Determina a URL do plugin que gera essa lista
+    if query == "trending":
+        target_url = get_url(action='trending')
+    elif query == "recent":
+        target_url = get_url(action='search_topic', query="Novidades", sort_by="date")
+    else:
+        target_url = get_url(action='search_topic', query=query)
+    
+    # Cria o arquivo em memória com a URL como conteúdo
+    file_content = target_url.encode('utf-8')
+    file_obj = BytesIO(file_content)
+    file_obj.name = filename
+    file_obj.type = 'text/plain'
+    
+    # Upload usando a função existente do google_storage
+    file_id = google_storage.upload_file(file_obj, filename)
+    
+    if file_id:
+        xbmcgui.Dialog().notification("Sucesso", f"Playlist salva no Drive!")
+    else:
+        xbmcgui.Dialog().notification("Erro", "Falha ao salvar no Drive.")
+
+def list_save_menu():
+    """Lista os tópicos com a ação de salvar."""
+    for label, query in TOPICS_LIST:
+        li = xbmcgui.ListItem(label=f"💾 Salvar: {label}")
+        li.setArt({'icon': 'DefaultAddonService.png'})
+        
+        url = get_url(action='save_topic', label=label, query=query)
+        xbmcplugin.addDirectoryItem(int(sys.argv[1]), url, li, isFolder=False)
+    
+    xbmcplugin.endOfDirectory(int(sys.argv[1]))
+
 def router(args):
     """Roteador de URL do plugin."""
     params = dict(urllib.parse.parse_qsl(args))
@@ -235,6 +378,16 @@ def router(args):
         channel_id = params.get('channel_id')
         if channel_id:
             list_videos(f"/api/v1/channels/{channel_id}/videos", {})
+    elif action == 'local_playlists':
+        list_local_playlists()
+    elif action == 'topics':
+        list_topics()
+    elif action == 'search_topic':
+        search_topic(params.get('query'), params.get('sort_by'))
+    elif action == 'save_menu':
+        list_save_menu()
+    elif action == 'save_topic':
+        save_topic_to_drive(params.get('label'), params.get('query'))
     else:
         # Menu Principal
         li = xbmcgui.ListItem(label="🔥 Em Alta (Brasil)")
@@ -243,6 +396,18 @@ def router(args):
         
         li = xbmcgui.ListItem(label="📺 Canais do Brasil")
         url = get_url(action='channels')
+        xbmcplugin.addDirectoryItem(int(sys.argv[1]), url, li, isFolder=True)
+        
+        li = xbmcgui.ListItem(label="📂 Playlists Locais (.strm)")
+        url = get_url(action='local_playlists')
+        xbmcplugin.addDirectoryItem(int(sys.argv[1]), url, li, isFolder=True)
+        
+        li = xbmcgui.ListItem(label="🏷️ Explorar Tópicos")
+        url = get_url(action='topics')
+        xbmcplugin.addDirectoryItem(int(sys.argv[1]), url, li, isFolder=True)
+        
+        li = xbmcgui.ListItem(label="💾 Salvar Playlists no Drive")
+        url = get_url(action='save_menu')
         xbmcplugin.addDirectoryItem(int(sys.argv[1]), url, li, isFolder=True)
 
         li = xbmcgui.ListItem(label="🔍 Buscar")

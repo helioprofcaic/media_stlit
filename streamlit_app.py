@@ -24,6 +24,14 @@ from core.services import check_and_start_services
 
 st.set_page_config(page_title="Streamlit Media Player", layout="wide")
 
+# Define o idioma da página para 'pt-BR' via JavaScript
+# Isso informa ao navegador que o conteúdo é em português e evita o pop-up de tradução.
+st.markdown("""
+    <script>
+        document.documentElement.lang = 'pt-BR';
+    </script>
+""", unsafe_allow_html=True)
+
 # --- Verificação de Configuração Essencial ---
 if not st.secrets:
     st.warning("⚠️ **Atenção:** Arquivo `.streamlit/secrets.toml` não encontrado ou vazio. As funcionalidades do Google Drive estarão desativadas.")
