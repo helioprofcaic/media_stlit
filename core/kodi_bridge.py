@@ -1028,7 +1028,7 @@ def setup_mocks():
     
     # Cria kodi.log dummy para plugins que fazem parsing de log (Elementum)
     log_path = os.path.join(DATA_DIR, "kodi.log")
-    if not os.path.exists(log_path) or os.path.getsize(log_path) == 0:
+    if not os.path.exists(log_path):
         try:
             with open(log_path, "w", encoding="utf-8") as f:
                 f.write("NOTICE: Starting Kodi (19.0). Platform: Windows NT x86 64-bit\n")
@@ -1098,7 +1098,8 @@ def run_plugin(plugin_path, param_string="", dialog_answers=None):
         # para evitar consumo de recursos em background.
         if 'plugin.video.elementum' in plugin_path:
             from core.services import start_service
-            start_service('plugin.video.elementum')
+            # Inicia em thread daemon para não bloquear
+            threading.Thread(target=start_service, args=('plugin.video.elementum',), daemon=True).start()
 
         # --- HOTFIX para URLs de categoria do Tube8 ---
         # O site alterou /cat/ para /categories/, causando erro 404 em plugins antigos.

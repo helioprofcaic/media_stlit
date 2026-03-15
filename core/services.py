@@ -11,8 +11,14 @@ _running_services = {}
 
 def start_service(addon_id):
     """Inicia o serviço (service.py) de um addon em uma thread separada."""
+    # Limpa referências a threads mortas
+    dead_services = [aid for aid, thread in _running_services.items() if not thread.is_alive()]
+    for aid in dead_services:
+        del _running_services[aid]
+
     if addon_id in _running_services:
-        return # Já está rodando
+        if _running_services[addon_id].is_alive():
+            return # Já está rodando e ativo
 
     addon_path = os.path.join(ADDONS_DIR, addon_id)
     if not os.path.exists(addon_path):

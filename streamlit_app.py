@@ -204,6 +204,50 @@ if st.session_state.input_dialog:
                 st.rerun()
     st.stop() # Para a renderização do resto da página até o usuário responder
 
+# --- Funções de Cache (Otimização de Performance) ---
+@st.cache_data(ttl=300, show_spinner=False)
+def get_installed_plugins_list():
+    """Escaneia o disco e retorna lista de plugins instalados. Cacheado por 5 min."""
+    plugins_list = []
+    scan_dirs = [ADDONS_DIR, PLUGINS_REPO_DIR]
+    
+    for d in scan_dirs:
+        if not os.path.exists(d):
+            continue
+            
+        try:
+            items = os.listdir(d)
+        except OSError:
+            continue
+            
+        for item in items:
+            plugin_path = os.path.join(d, item)
+            addon_xml = os.path.join(plugin_path, 'addon.xml')
+            
+            if os.path.isdir(plugin_path) and os.path.exists(addon_xml):
+                name = item
+                try:
+                    tree = ET.parse(addon_xml)
+                    root = tree.getroot()
+                    name = root.get('name', item)
+                except:
+                    pass
+                
+                name = remove_kodi_formatting(name)
+                
+                category = "Outros"
+                if item.startswith("plugin.video"): category = "Vídeo"
+                elif item.startswith("plugin.audio"): category = "Áudio"
+                elif item.startswith("plugin.program"): category = "Programas"
+                elif item.startswith("repository"): category = "Repositórios"
+                elif item.startswith("script"): category = "Scripts"
+                
+                # Adiciona à lista se ainda não estiver (evita duplicatas entre pastas)
+                if not any(p['id'] == item for p in plugins_list):
+                    plugins_list.append({'id': item, 'name': name, 'category': category})
+                    
+    return plugins_list
+
 # Sidebar: Lista de Plugins Instalados
 with st.sidebar:
     st.header("Fonte de Mídia")
@@ -216,45 +260,15 @@ with st.sidebar:
             st.rerun()
     
     if source_mode == "Plugins Kodi":
-        plugins_by_category = {}
+        all_plugins = get_installed_plugins_list()
         
-        # Escaneia pastas
-        for d in [ADDONS_DIR, PLUGINS_REPO_DIR]:
-            if os.path.exists(d):
-                for item in os.listdir(d):
-                    plugin_path = os.path.join(d, item)
-                    addon_xml = os.path.join(plugin_path, 'addon.xml')
-                    
-                    if os.path.isdir(plugin_path) and os.path.exists(addon_xml):
-                        # Tenta extrair nome do XML
-                        name = item
-                        try:
-                            tree = ET.parse(addon_xml)
-                            root = tree.getroot()
-                            name = root.get('name', item)
-                        except:
-                            pass
-                        name = remove_kodi_formatting(name)
-                        
-                        # Categoriza pelo ID
-                        category = "Outros"
-                        if item.startswith("plugin.video"):
-                            category = "Vídeo"
-                        elif item.startswith("plugin.audio"):
-                            category = "Áudio"
-                        elif item.startswith("plugin.program"):
-                            category = "Programas"
-                        elif item.startswith("repository"):
-                            category = "Repositórios"
-                        elif item.startswith("script"):
-                            category = "Scripts"
-                            
-                        if category not in plugins_by_category:
-                            plugins_by_category[category] = []
-                        
-                        # Evita duplicatas
-                        if not any(p['id'] == item for p in plugins_by_category[category]):
-                            plugins_by_category[category].append({'id': item, 'name': name})
+        # Agrupa por categoria
+        plugins_by_category = {}
+        for p in all_plugins:
+            cat = p['category']
+            if cat not in plugins_by_category:
+                plugins_by_category[cat] = []
+            plugins_by_category[cat].append(p)
 
         # Ordena categorias
         categories = sorted(plugins_by_category.keys())
@@ -891,22 +905,10 @@ else:
 
     # Seção 3: Plugins Instalados (Grid)
     st.subheader("🧩 Meus Plugins")
-    found_plugins = []
-    for d in [ADDONS_DIR, PLUGINS_REPO_DIR]:
-        if os.path.exists(d):
-            for item in os.listdir(d):
-                plugin_path = os.path.join(d, item)
-                addon_xml = os.path.join(plugin_path, 'addon.xml')
-                if os.path.isdir(plugin_path) and os.path.exists(addon_xml):
-                    name = item
-                    try:
-                        tree = ET.parse(addon_xml)
-                        name = tree.getroot().get('name', item)
-                    except: pass
-                    name = remove_kodi_formatting(name)
-                    if item.startswith("plugin.video") or item.startswith("plugin.audio"):
-                        if not any(p['id'] == item for p in found_plugins):
-                            found_plugins.append({'id': item, 'name': name})
+    
+    all_plugins = get_installed_plugins_list()
+    # Filtra apenas Vídeo e Áudio para a home
+    found_plugins = [p for p in all_plugins if p['category'] in ['Vídeo', 'Áudio']]
     
     if found_plugins:
         cols = st.columns(3)
