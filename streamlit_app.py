@@ -437,37 +437,47 @@ if st.session_state.history:
                 # 2. Tratamento de URL (Headers e Redirects)
                 final_url_for_player = url
                 headers_for_player = ""
-                clean_url = url
+                clean_url = url.split('|')[0]
+                headers_str = url.split('|')[1] if '|' in url else ""
                 
-                if "|" in url:
-                    clean_url = url.split("|")[0]
-                    headers_str = url.split("|")[1]
-                    final_url_for_player = clean_url
-                    headers_for_player = headers_str
-                    
-                    # Resolução de Redirects (Blogger/Google)
+                # --- Resolução de Redirects para HLS (.m3u8) ---
+                # Resolve redirecionamentos (302) antes de passar para o player,
+                # para que o player use a URL final e estável para atualizar os segmentos.
+                is_hls = ".m3u8" in clean_url.split('?')[0]
+                if is_hls:
                     try:
-                        headers = {}
-                        for h in headers_str.split('&'):
-                            if '=' in h:
-                                k, v = h.split('=', 1)
-                                headers[urllib.parse.unquote(k)] = urllib.parse.unquote(v)
+                        import requests
+                        import urllib3
+                        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
                         
-                        if headers:
-                            import requests
-                            import urllib3
-                            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-                            r = requests.get(clean_url, headers=headers, allow_redirects=False, stream=True, timeout=5, verify=False)
-                            if r.status_code in [301, 302, 303, 307, 308] and 'Location' in r.headers:
-                                clean_url = r.headers['Location']
-                    except Exception as e:
-                        print(f"Falha ao resolver URL protegida: {e}")
+                        req_headers = {}
+                        if headers_str:
+                            for h in headers_str.split('&'):
+                                if '=' in h:
+                                    k, v = h.split('=', 1)
+                                    req_headers[urllib.parse.unquote(k)] = urllib.parse.unquote(v)
 
+                        # Segue até 5 redirecionamentos
+                        temp_url = clean_url
+                        for _ in range(5):
+                            r = requests.head(temp_url, headers=req_headers, allow_redirects=False, timeout=5, verify=False)
+                            if r.status_code in [301, 302, 303, 307, 308] and 'Location' in r.headers:
+                                temp_url = urllib.parse.urljoin(temp_url, r.headers['Location'])
+                            else:
+                                break
+                        
+                        clean_url = temp_url
+                        url = f"{clean_url}|{headers_str}" if headers_str else clean_url
+                    except Exception as e:
+                        print(f"Falha ao resolver redirect HLS: {e}")
+
+                final_url_for_player = clean_url
+                headers_for_player = headers_str
+
+                if headers_for_player:
                     with st.expander("⚠️ Informações de Proteção (Headers)", expanded=False):
                         st.warning("Este vídeo usa proteção por headers. Se não tocar, é porque o navegador bloqueia requisições customizadas.")
                         st.code(headers_str)
-                    
-                    url = clean_url
 
                 # --- Diagnóstico de Link (MixDrop e Status) ---
                 if not url.startswith("magnet:") and "youtube.com" not in url:

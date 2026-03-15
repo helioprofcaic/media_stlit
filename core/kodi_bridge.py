@@ -78,6 +78,7 @@ class MockListItem:
         self.properties = {}
         self.context_menu = []
         self.media_type = 'video'
+        self.subtitles = []
 
     def setArt(self, art):
         self.art.update(art)
@@ -91,6 +92,9 @@ class MockListItem:
 
     def addContextMenuItems(self, items):
         self.context_menu.extend(items)
+    
+    def setSubtitles(self, subtitles):
+        self.subtitles = subtitles
     
     def getLabel(self):
         if isinstance(self.label, bytes):
@@ -119,6 +123,10 @@ class MockXBMC:
     
     @staticmethod
     def log(msg, level=LOGNOTICE):
+        # Filtra logs excessivos que causam lentidão na interface (spam do Elementum/Requests)
+        msg_str = str(msg)
+        if any(s in msg_str for s in ['Cache hit', 'iCCP', 'Compression method', '404', 'TS Downloader']):
+            return
         print(f"[KODI LOG] {msg}")
 
     @staticmethod
@@ -331,7 +339,8 @@ class MockXBMC:
                     "artist": info.get('artist'),
                     "plot": info.get('plot'),
                     "icon": art.get('icon') or art.get('thumb'),
-                    "type": getattr(target_listitem, 'media_type', 'video')
+                    "type": getattr(target_listitem, 'media_type', 'video'),
+                    "subtitles": getattr(target_listitem, 'subtitles', [])
                 }
             else:
                 # Fallback: Tenta obter metadados dos parâmetros originais da URL do plugin
@@ -613,7 +622,8 @@ class MockXBMCPlugin:
             "artist": info.get('artist'),
             "plot": info.get('plot'),
             "icon": art.get('icon') or art.get('thumb'),
-            "type": getattr(listitem, 'media_type', 'video')
+            "type": getattr(listitem, 'media_type', 'video'),
+            "subtitles": getattr(listitem, 'subtitles', [])
         }
 
         data["resolved_url"] = path

@@ -10,6 +10,7 @@ O projeto utiliza uma arquitetura de **Mocking** (Simulação) para executar plu
     *   Este é o núcleo do sistema. Ele intercepta as chamadas que os plugins fazem para `import xbmc`, `xbmcgui`, `xbmcplugin`.
     *   **Thread Safety**: Utiliza `threading.local()` para armazenar o estado da navegação (itens da lista, URL resolvida). Isso é crucial para o Streamlit, onde múltiplas sessões rodam simultaneamente em threads diferentes.
     *   **Dependency Injection**: Injeta módulos falsos (`MockXBMC`, `MockXBMCAddon`) no `sys.modules` antes de executar o plugin.
+    *   **Detecção de Plataforma**: Identifica automaticamente o sistema operacional (Windows/Linux) e a arquitetura (x64, arm, etc.) para retornar os binários corretos em plugins que dependem de código nativo (ex: Elementum), simulando a configuração `binary_platform`.
 
 2.  **Streamlit App (`streamlit_app.py`)**:
     *   Frontend Web.
@@ -27,12 +28,18 @@ O projeto utiliza uma arquitetura de **Mocking** (Simulação) para executar plu
     *   Gerencia a conexão com a API do Google Drive.
     *   Usa `st.secrets` para autenticação segura via Service Account.
 
+5.  **Serviços em Background (`core/services.py`)**:
+    *   Detecta e executa scripts de serviço (`service.py`) definidos nos `addon.xml`.
+    *   Essencial para addons como **Elementum** que iniciam servidores locais (daemon) para processar torrents antes do streaming.
+    *   Roda em threads separadas para não bloquear a interface principal.
+
 ## Estrutura de Pastas
 
 ```text
 root/
 ├── core/               # Lógica do sistema
 │   ├── kodi_bridge.py  # Simulação da API Kodi
+│   ├── services.py     # Gerenciador de serviços (daemons)
 │   ├── repository.py   # Gerenciador de downloads de addons
 │   └── utils.py        # Funções auxiliares e paths
 ├── data/               # (Ignorado pelo Git)
@@ -43,6 +50,7 @@ root/
 │   ├── drive_sync.py   # Sincronização
 │   ├── navigation.py   # Navegação e execução
 │   └── utils.py        # Utilitários
+├── playlists/          # Arquivos .strm para acesso rápido local
 ├── plugin/             # Pasta para desenvolvimento local de plugins
 ├── streamlit_app.py    # Entry point Web
 └── video_player.py     # Entry point Desktop
@@ -61,6 +69,18 @@ root/
 5.  O Plugin chama `xbmcplugin.addDirectoryItem`.
 6.  O **MockXBMCPlugin** captura esses itens e os salva na memória local da thread.
 7.  O Bridge retorna a lista de itens para a interface (Streamlit ou PyQt) renderizar.
+
+## Reprodução de Streams e HLS
+
+O player implementa uma lógica robusta para lidar com streams complexos, especialmente IPTV e HLS (`.m3u8`):
+
+1.  **Resolução de Redirecionamentos (302 Found)**:
+    *   Muitos serviços de IPTV usam URLs temporárias ou tokens que expiram.
+    *   O `streamlit_app.py` intercepta URLs `.m3u8`, faz requisições `HEAD` sucessivas para seguir redirecionamentos e entrega a URL final e estável para o player HTML5.
+    *   Isso previne travamentos onde o player tentaria re-autenticar a cada segmento do vídeo.
+
+2.  **Arquivos .strm**:
+    *   Suporte nativo a arquivos de texto contendo URLs diretas (YouTube, M3U8, etc).
 
 ## Dependências e Addons
 
