@@ -14,7 +14,7 @@ except:
     HANDLE = 1
 
 # Extensões de vídeo suportadas
-VIDEO_EXTENSIONS = ('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.mp3', '.wav', '.m4v')
+VIDEO_EXTENSIONS = ('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.mp3', '.wav', '.m4v', '.strm')
 
 # --- Sistema de Favoritos ---
 ADDON = xbmcaddon.Addon()
@@ -74,6 +74,10 @@ def list_favorites():
 def get_drives():
     """Lista as unidades de armazenamento disponíveis e pastas comuns."""
     drives = []
+    
+    # Adiciona a pasta raiz do projeto (útil em ambientes como Streamlit Cloud)
+    project_root = os.getcwd()
+    drives.append(("Pasta do Projeto (Atual)", project_root))
     
     # Adiciona pasta do usuário (Home) como atalho conveniente
     home = os.path.expanduser("~")
@@ -151,7 +155,11 @@ def list_directory(path):
                 li = xbmcgui.ListItem(label=item)
                 li.setInfo('video', {'title': item, 'mediatype': 'video'})
                 li.setProperty('IsPlayable', 'true')
-                li.setArt({'icon': 'DefaultVideo.png'})
+                
+                if item.lower().endswith('.strm'):
+                    li.setArt({'icon': 'DefaultNetwork.png'})
+                else:
+                    li.setArt({'icon': 'DefaultVideo.png'})
                 
                 # Para arquivos locais, passamos o path direto para play
                 url_params = urllib.parse.urlencode({'action': 'play', 'path': full_path})
