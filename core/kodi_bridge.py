@@ -978,7 +978,20 @@ class MockXBMCAddon:
             if id == 'remote_host': return "127.0.0.1"
             if id == 'binary_platform': 
                 import platform
-                if platform.system() == 'Windows': return "windows_x64"
+                system = platform.system()
+                machine = platform.machine().lower()
+
+                if system == 'Windows':
+                    return 'windows_x64' if '64' in machine else 'windows_x86'
+                elif system == 'Linux':
+                    if 'aarch64' in machine or 'armv8' in machine:
+                        return 'linux_arm64'
+                    elif 'arm' in machine: # Catches armv7l etc.
+                        return 'linux_armv7'
+                    return 'linux_x64' if '64' in machine else 'linux_x86'
+                elif system == 'Darwin':
+                    return 'darwin_x64' # macOS
+                # Fallback para o ambiente mais provável em nuvem se desconhecido
                 return "linux_x64"
 
             # Retorna string vazia para campos de texto/credenciais para evitar "0"
@@ -1213,12 +1226,18 @@ def run_plugin(plugin_path, param_string="", dialog_answers=None):
                 if os.path.exists(extra_lib) and extra_lib not in paths_to_add:
                     paths_to_add.append(extra_lib)
             
-            # --- Hack para Elementum/Platform Detect no Windows ---
+            # --- Hack para Elementum/Platform Detect (prioriza libs nativas) ---
+            platform_folder = None
             if sys.platform == 'win32':
-                # Tenta encontrar e priorizar bibliotecas nativas do Windows x64
-                win64_lib = os.path.join(addon_root, 'resources', 'site-packages', 'platform_detect', 'libraries', 'windows_x64')
-                if os.path.exists(win64_lib) and win64_lib not in paths_to_add:
-                    paths_to_add.insert(0, win64_lib)
+                platform_folder = 'windows_x64'
+            elif sys.platform.startswith('linux'):
+                platform_folder = 'linux_x64'
+            
+            if platform_folder:
+                # Tenta encontrar e priorizar bibliotecas nativas da plataforma atual
+                platform_lib_path = os.path.join(addon_root, 'resources', 'site-packages', 'platform_detect', 'libraries', platform_folder)
+                if os.path.exists(platform_lib_path) and platform_lib_path not in paths_to_add:
+                    paths_to_add.insert(0, platform_lib_path)
             
             # --- Resolve dependências (outros addons) ---
             # Tenta encontrar a pasta de addons pai para buscar dependências listadas no addon.xml
