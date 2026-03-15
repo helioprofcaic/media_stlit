@@ -90,7 +90,7 @@ def check_and_start_services():
     # No futuro, isso poderia ler todos os addon.xml
     known_services = [
         'repository.elementumorg',
-        'plugin.video.elementum' # O Elementum principal também tem um serviço binário complexo
+        # 'plugin.video.elementum' # Desativado o início automático. Será iniciado sob demanda pelo kodi_bridge.
     ]
     
     for addon_id in known_services:

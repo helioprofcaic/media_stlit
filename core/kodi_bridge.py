@@ -1092,6 +1092,13 @@ def setup_mocks():
 def run_plugin(plugin_path, param_string="", dialog_answers=None):
     """Executa o plugin e retorna os itens ou a URL resolvida."""
     with _plugin_lock:
+        # --- Início de Serviços Sob Demanda ---
+        # Inicia o serviço do Elementum apenas quando o plugin for executado,
+        # para evitar consumo de recursos em background.
+        if 'plugin.video.elementum' in plugin_path:
+            from core.services import start_service
+            start_service('plugin.video.elementum')
+
         # --- HOTFIX para URLs de categoria do Tube8 ---
         # O site alterou /cat/ para /categories/, causando erro 404 em plugins antigos.
         # Isto intercepta e corrige a URL antes de passá-la para o plugin.

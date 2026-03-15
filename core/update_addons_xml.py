@@ -13,16 +13,42 @@ def fetch_and_update_addons_xml(repo_url, addons_dir):
         addons_dir (str): The directory where addons are installed.
     """
     try:
+        # Smart GitHub URL conversion (similar to repository.py)
+        if "github.com" in repo_url and "raw.githubusercontent.com" not in repo_url:
+            try:
+                clean_url = repo_url.replace(".git", "").rstrip('/')
+                parts = clean_url.split('/')
+                if len(parts) >= 5:
+                    user = parts[3]
+                    repo = parts[4]
+                    # Default to master/main if not specified
+                    repo_url = f"https://raw.githubusercontent.com/{user}/{repo}/master/"
+            except Exception as e:
+                log_to_file(f"GitHub URL conversion failed: {e}")
+
         # Ensure the URL ends with a forward slash
         if not repo_url.endswith('/'):
             repo_url += '/'
 
-        addons_xml_url = f"{repo_url}addons.xml"
-        response = requests.get(addons_xml_url, timeout=15)
-        response.raise_for_status()
-        xml_content = response.content.decode('utf-8', errors='ignore')
+        # Try common paths for addons.xml
+        candidates = ["addons.xml", "zips/addons.xml", "addon.xml"]
+        response = None
+        
+        for candidate in candidates:
+            try:
+                r = requests.get(f"{repo_url}{candidate}", timeout=15)
+                if r.status_code == 200:
+                    response = r
+                    break
+            except requests.exceptions.RequestException:
+                continue
 
-        root = ET.fromstring(xml_content)
+        if not response:
+            raise Exception(f"Could not find addons.xml in {repo_url} (checked: {candidates})")
+
+        # Parse directly from bytes to let ElementTree handle encoding (utf-8, iso-8859-1, etc.)
+        root = ET.fromstring(response.content)
+        
         for addon in root.findall('addon'):
             addon_id = addon.get('id')
             version = addon.get('version')
