@@ -59,7 +59,8 @@ if 'local_sync_done' not in st.session_state:
     
     # --- Criação de Playlists/Atalhos de Exemplo (.strm) ---
     try:
-        playlists_dir = os.path.join(os.getcwd(), "data", "playlists")
+        # Alterado para pasta 'playlists' na raiz do projeto para garantir que suba pro GitHub
+        playlists_dir = os.path.join(os.getcwd(), "playlists")
         if not os.path.exists(playlists_dir):
             os.makedirs(playlists_dir)
         
