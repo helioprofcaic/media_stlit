@@ -13,7 +13,11 @@ env/
 .streamlit/secrets.toml
 
 # Dados Locais e Logs (Gerados em tempo de execução)
-data/
+data/*
+data/last_playlist.json
+data/memory.json
+data/*.json
+!data/playlists/
 docs/rascunhos.md
 plugin/plugin.video.tube8_explore/
 plugin/plugin.video.elementum/*
