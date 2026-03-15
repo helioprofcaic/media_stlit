@@ -56,6 +56,24 @@ if 'active_plugin_url' not in st.session_state:
 if 'local_sync_done' not in st.session_state:
     # Garante que plugins padrão estejam em data/addons na primeira execução
     sync_local_plugins()
+    
+    # --- Criação de Playlists/Atalhos de Exemplo (.strm) ---
+    try:
+        playlists_dir = os.path.join(os.getcwd(), "data", "playlists")
+        if not os.path.exists(playlists_dir):
+            os.makedirs(playlists_dir)
+        
+        samples = {
+            "LoFi Radio (YouTube).strm": "https://www.youtube.com/watch?v=jfKfPfyJRdk",
+            "News Live (YouTube).strm": "https://www.youtube.com/watch?v=1nodQjMbaSs"
+        }
+        for name, link in samples.items():
+            p = os.path.join(playlists_dir, name)
+            if not os.path.exists(p):
+                with open(p, "w") as f: f.write(link)
+    except Exception as e:
+        print(f"Erro ao criar samples .strm: {e}")
+
     st.session_state.local_sync_done = True
     
     # Inicia serviços em background (ex: servidor do repositório Elementum)
@@ -373,6 +391,14 @@ if st.session_state.history:
     if st.session_state.get('video_url'):
         url = st.session_state.video_url
         
+        # --- Resolve arquivos .strm locais (Links de texto) ---
+        if not url.startswith("http") and url.lower().endswith(".strm") and os.path.exists(url):
+            try:
+                with open(url, "r") as f:
+                    content = f.read().strip()
+                    if content: url = content
+            except: pass
+
         # Identifica o tipo de conteúdo para separar a lógica
         is_local = not url.startswith("http")
         is_gdrive = "drive.google.com" in url
@@ -586,7 +612,7 @@ if st.session_state.history:
                         # Lista todos os arquivos de mídia suportados na pasta
                         media_files = sorted([
                             f for f in os.listdir(directory) 
-                            if f.lower().endswith(('.mp4', '.mkv', '.avi', '.mov', '.mp3', '.wav', '.flac', '.ogg', '.m4a'))
+                            if f.lower().endswith(('.mp4', '.mkv', '.avi', '.mov', '.mp3', '.wav', '.flac', '.ogg', '.m4a', '.strm'))
                         ])
                         
                         st.session_state.current_playlist = [os.path.join(directory, f) for f in media_files]
