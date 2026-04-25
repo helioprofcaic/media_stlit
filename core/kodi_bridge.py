@@ -10,6 +10,7 @@ import threading
 import re
 import warnings
 import logging
+import socket
 from core.utils import ADDONS_DIR, DATA_DIR, PLUGINS_REPO_DIR, remove_kodi_formatting, log_to_file
 
 # Armazenamento local para thread (suporte a multiusuário no Streamlit)
@@ -1203,6 +1204,57 @@ def _patch_ssl_ciphers():
     except Exception as e:
         print(f"[BRIDGE] Aviso: Não foi possível aplicar o patch de SSL. {e}")
 
+def _patch_dns_resolver():
+    """
+    Monkey-patches socket.getaddrinfo to use DNS-over-HTTPS (DoH) for name resolution.
+    This helps bypass ISP-level blocking of domains used by some addons.
+    It falls back to the original resolver if DoH fails.
+    """
+    if getattr(socket, '_patched_by_mediastlit_dns', False):
+        return
+
+    original_getaddrinfo = socket.getaddrinfo
+    dns_cache = {}
+
+    def doh_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+        # Se já for um IP, não precisa resolver
+        try:
+            socket.inet_aton(host)
+            return original_getaddrinfo(host, port, family, type, proto, flags)
+        except (socket.error, OSError):
+            pass # Não é um IP, continuar para resolução
+
+        # Verifica o cache
+        if host in dns_cache:
+            return dns_cache[host]
+
+        try:
+            # Usa o requests (que já está patcheado com cloudscraper) para a consulta DoH
+            import requests
+            doh_url = "https://cloudflare-dns.com/dns-query"
+            params = {'name': host, 'type': 'A'}
+            headers = {'accept': 'application/dns-json'}
+            
+            response = requests.get(doh_url, params=params, headers=headers, timeout=5)
+            response.raise_for_status()
+            dns_json = response.json()
+
+            if dns_json.get('Answer'):
+                ip_address = dns_json['Answer'][0]['data']
+                # Chama o original com o IP resolvido para obter a estrutura correta
+                result = original_getaddrinfo(ip_address, port, family, type, proto, flags)
+                dns_cache[host] = result # Armazena no cache
+                log_to_file(f"[DNS] Resolvido via DoH: {host} -> {ip_address}")
+                return result
+        except Exception as e:
+            log_to_file(f"[DNS] Falha na resolução DoH para {host}: {e}. Usando resolver padrão.")
+
+        return original_getaddrinfo(host, port, family, type, proto, flags)
+
+    socket.getaddrinfo = doh_getaddrinfo
+    socket._patched_by_mediastlit_dns = True
+    print("[BRIDGE] Resolver DNS (DoH) ativado para contornar bloqueios.")
+
 def setup_mocks():
     """Injeta os módulos falsos no sistema para o plugin importar."""
     
@@ -1310,6 +1362,9 @@ def setup_mocks():
 
     # Apply the SSL cipher patch for compatibility with older addons
     _patch_ssl_ciphers()
+    
+    # Apply the DNS patch to bypass potential ISP blocks
+    _patch_dns_resolver()
 
 def run_plugin(plugin_path, param_string="", dialog_answers=None):
     """Executa o plugin e retorna os itens ou a URL resolvida."""

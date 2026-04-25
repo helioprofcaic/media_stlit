@@ -20,14 +20,15 @@
         "B:\\Local\\Dev\\media_stlit\\data\\addons\\plugin.video.pluginstreaming\\default.py",
         "B:\\Local\\Dev\\media_stlit\\data\\addons\\plugin.video.VikingsFREE\\default.py",
         "B:\\Local\\Dev\\media_stlit\\data\\addons\\plugin.video.viking.tv.online\\default.py",
-        "B:\\Local\\Dev\\media_stlit\\plugin\\plugin.video.comandoplay\\main.py"
+        "B:\\Local\\Dev\\media_stlit\\plugin\\plugin.video.comandoplay\\main.py",
+        "B:\\Local\\Dev\\media_stlit\\data\\addons\\plugin.video.comandoplay\\main.py"
     ],
-    "last_plugin": "B:\\Local\\Dev\\media_stlit\\plugin\\plugin.video.comandoplay\\main.py",
+    "last_plugin": "B:\\Local\\Dev\\media_stlit\\data\\addons\\plugin.video.viking.tv.online\\default.py",
     "last_directory": "B:/Local/Dev/media_stlit/plugin",
     "last_video": "resume:select:0",
     "cache_config": {
-        "buffer_size_mb": 100,
-        "read_factor": 15,
-        "chunk_size_kb": 96
+        "buffer_size_mb": 128,
+        "read_factor": 12,
+        "chunk_size_kb": 512
     }
 }
