@@ -3,13 +3,14 @@ import os
 import importlib.util
 import xml.etree.ElementTree as ET
 import shutil
+import io
 import urllib.parse
 import json
 import threading
 import re
 import warnings
 import logging
-from core.utils import ADDONS_DIR, DATA_DIR, PLUGINS_REPO_DIR, remove_kodi_formatting
+from core.utils import ADDONS_DIR, DATA_DIR, PLUGINS_REPO_DIR, remove_kodi_formatting, log_to_file
 
 # Armazenamento local para thread (suporte a multiusuário no Streamlit)
 _local = threading.local()
@@ -414,6 +415,8 @@ class MockXBMCGUI:
     NOTIFICATION_ERROR = 'error'
     INPUT_NUMERIC = 0
     INPUT_ALPHANUM = 1
+    INPUT_PASSWORD = 2
+    ALPHANUM_HIDE_INPUT = ''
 
     @staticmethod
     def getCurrentWindowId():
@@ -673,6 +676,11 @@ class MockXBMCPlugin:
     @staticmethod
     def addSortMethod(handle, sortMethod, label2Mask=""):
         pass
+
+    @staticmethod
+    def setProperty(handle, key, value):
+        """Simula a definição de uma propriedade para um item de lista. Usado para passar dados para a skin."""
+        print(f"[KODI PLUGIN] setProperty(handle={handle}, key='{key}', value='{value}')")
 
 class MockXBMCVFS:
     @staticmethod
@@ -1048,6 +1056,10 @@ class MockXBMCAddon:
             if any(x in id_lower for x in ['enable', 'show', 'use', 'hide', 'active', 'auto', 'local_only_client']):
                 return "true"
             
+            # Heurística para configurações de DNS. '0' geralmente significa 'Padrão'.
+            if id_lower == 'dns':
+                return "0"
+
             # Heurísticas para plugins de IPTV BR (ex: FaustinoTV)
             if any(x in id_lower for x in ['adult', 'uhdtv', 'fhdtv', 'hdtv', 'sdtv']):
                 return "true" # Mostra todas as qualidades/categorias por padrão
@@ -1098,6 +1110,98 @@ class MockXBMCAddon:
             return MockLocalizedString(label)
 
 # --- Função Principal da Ponte ---
+
+def _patch_urllib():
+    """
+    Monkey-patches urllib.request.urlopen to include a default User-Agent header
+    in all requests. This is crucial for many Kodi addons that are blocked by
+    servers when using Python's default User-Agent.
+    """
+    # Evita aplicar o patch múltiplas vezes se a função for chamada novamente
+    if getattr(urllib.request, '_patched_by_mediastlit', False):
+        return
+
+    try:
+        import cloudscraper
+        scraper = cloudscraper.create_scraper()
+        print("[BRIDGE] CloudScraper ativado para todas as requisições de rede.")
+
+        # --- Patch para urllib.request ---
+        original_urlopen = urllib.request.urlopen
+        def patched_urlopen(url, *args, **kwargs):
+            if isinstance(url, urllib.request.Request):
+                req_url = url.get_full_url()
+                req_headers = url.headers
+            else:
+                req_url = url
+                req_headers = {}
+
+            # Força um User-Agent moderno, sobrescrevendo o do plugin se necessário
+            req_headers['User-Agent'] = MockXBMC.getUserAgent()
+
+            try:
+                response = scraper.get(req_url, headers=req_headers, timeout=kwargs.get('timeout', 15))
+                response.raise_for_status()
+                log_to_file(f"[BRIDGE] urllib (via CloudScraper) Success: {req_url}")
+                return io.BytesIO(response.content)
+            except Exception as e:
+                log_to_file(f"[BRIDGE] urllib (via CloudScraper) falhou para {req_url}: {e}")
+                raise urllib.error.HTTPError(req_url, 403, f"Forbidden (CloudScraper failed: {e})", {}, None)
+
+        urllib.request.urlopen = patched_urlopen
+        urllib.request._patched_by_mediastlit = True
+
+        # --- Patch para a biblioteca requests ---
+        # Alguns plugins (como o proxy do Viking) usam 'requests' diretamente.
+        import requests
+        original_requests_get = requests.get
+        original_requests_post = requests.post
+
+        def patched_get(url, **kwargs):
+            # Garante que o scraper do cloudscraper seja usado
+            return scraper.get(url, timeout=kwargs.get('timeout', 20), **kwargs)
+
+        def patched_post(url, **kwargs):
+            # Garante que o scraper do cloudscraper seja usado
+            return scraper.post(url, timeout=kwargs.get('timeout', 20), **kwargs)
+
+        requests.get = patched_get
+        requests.post = patched_post
+        requests.Session.get = patched_get
+        requests.Session.post = patched_post
+
+    except ImportError:
+        print("[BRIDGE] CloudScraper não encontrado. Usando urllib padrão com headers.")
+        original_urlopen = urllib.request.urlopen
+        def urlopen_with_ua(url, *args, **kwargs):
+            req = url if isinstance(url, urllib.request.Request) else urllib.request.Request(url)
+            if not req.has_header('User-Agent'):
+                req.add_header('User-Agent', MockXBMC.getUserAgent())
+            return original_urlopen(req, *args, **kwargs)
+        urllib.request.urlopen = urlopen_with_ua
+        urllib.request._patched_by_mediastlit = True
+
+def _patch_ssl_ciphers():
+    """
+    Monkey-patches a low-level SSL function to prevent old plugins from
+    crashing when they try to set outdated SSL cipher suites.
+    This is a common issue with plugins that haven't been updated.
+    """
+    try:
+        import urllib3.util.ssl_
+        if not hasattr(urllib3.util.ssl_, '_original_create_urllib3_context'):
+            urllib3.util.ssl_._original_create_urllib3_context = urllib3.util.ssl_.create_urllib3_context
+            
+            def _patched_create_urllib3_context(*args, **kwargs):
+                context = urllib3.util.ssl_._original_create_urllib3_context(*args, **kwargs)
+                # Sobrescreve o método set_ciphers para não fazer nada
+                context.set_ciphers = lambda *args, **kwargs: None
+                return context
+
+            urllib3.util.ssl_.create_urllib3_context = _patched_create_urllib3_context
+            print("[BRIDGE] SSL cipher patch aplicado para compatibilidade.")
+    except Exception as e:
+        print(f"[BRIDGE] Aviso: Não foi possível aplicar o patch de SSL. {e}")
 
 def setup_mocks():
     """Injeta os módulos falsos no sistema para o plugin importar."""
@@ -1181,6 +1285,9 @@ def setup_mocks():
     if 'urlresolver' not in sys.modules:
         sys.modules['urlresolver'] = MockResolveURL
         
+    if 'cloudscraper' not in sys.modules:
+        sys.modules['cloudscraper'] = None # Permite que a verificação de importação funcione
+
     if 'metahandler' not in sys.modules:
         sys.modules['metahandler'] = MockMetaHandler
 
@@ -1197,6 +1304,12 @@ def setup_mocks():
         
         sys.modules['elementum'] = elementum
         sys.modules['elementum.provider'] = elementum.provider
+
+    # Apply the urllib patch to handle HTTP 403 errors
+    _patch_urllib()
+
+    # Apply the SSL cipher patch for compatibility with older addons
+    _patch_ssl_ciphers()
 
 def run_plugin(plugin_path, param_string="", dialog_answers=None):
     """Executa o plugin e retorna os itens ou a URL resolvida."""

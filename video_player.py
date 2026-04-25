@@ -268,19 +268,11 @@ class VideoPlayer(QMainWindow):
         self.mediaPlayer.mediaStatusChanged.connect(self.media_status_changed)
         self.mediaPlayer.metaDataChanged.connect(self.on_meta_data_changed)
 
-        # Tenta restaurar o último plugin usado (opcional)
-        if self.memory.get('last_plugin') and os.path.exists(self.memory['last_plugin']):
-            log_to_file(f"Restaurando último plugin: {self.memory['last_plugin']}")
-            # Descomente a linha abaixo se quiser carregar o plugin automaticamente ao abrir
-            # self.current_plugin_path = self.memory['last_plugin']
-            # self.run_plugin_action("")
-
-        # Tenta restaurar a última playlist local e vídeo
-        last_video = self.memory.get('last_video')
-        if last_video and os.path.exists(last_video):
-            log_to_file(f"Restaurando último vídeo: {last_video}")
-            self.init_playlist(last_video)
-            self.load_video(last_video)
+        # Tenta restaurar o último plugin usado para uma inicialização mais rápida
+        last_plugin_path = self.memory.get('last_plugin')
+        if last_plugin_path and os.path.exists(last_plugin_path):
+            log_to_file(f"Restaurando último plugin: {last_plugin_path}")
+            self.run_plugin_from_path(last_plugin_path)
 
     def setup_logging(self):
         """Redireciona logs do Kodi Bridge para o arquivo."""
@@ -542,6 +534,11 @@ class VideoPlayer(QMainWindow):
             import bs4
         except ImportError:
             missing.append("beautifulsoup4")
+
+        try:
+            import cloudscraper
+        except ImportError:
+            missing.append("cloudscraper")
 
         try:
             import chardet
@@ -1368,13 +1365,3 @@ class VideoPlayer(QMainWindow):
         save_memory(self.memory)
         self.save_playlist_state()
         log_to_file("=== Sessão Finalizada ===\n")
-        super().closeEvent(event)
-
-if __name__ == "__main__":
-    if not PYQT_AVAILABLE:
-        install_pyqt()
-    else:
-        app = QApplication(sys.argv)
-        player = VideoPlayer()
-        player.show()
-        sys.exit(app.exec())

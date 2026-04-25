@@ -43,7 +43,7 @@ IF EXIST requirements.txt (
 REM --- Execução do Player ---
 echo.
 echo [LOADER] Iniciando o Player Desktop...
-python video_player.py
+python load_player.py
 
 REM --- Finalização ---
 echo.

@@ -344,12 +344,18 @@ class StreamBuffer(QIODevice):
             # Espera até ter pelo menos um pouco de dados (ex: 32KB para HD ou chunk_size)
             # Isso evita retornar blocos minúsculos que podem causar stutter no motor do player
             min_read = min(32768, maxlen)
-            while self._buffer_size < min_read and not self._eof and not self._error and not self._stop_flag:
-                # Aumentamos o timeout de espera para 2.0s para ser mais resiliente a jitter de rede
-                if not self._cond.wait(timeout=2.0):
+            # Aumentamos o timeout de espera para 5.0s para ser mais resiliente a jitter de rede
+            # e dar mais tempo para a thread de download se recuperar de uma falha.
+            wait_success = self._cond.wait_for(
+                lambda: self._buffer_size >= min_read or self._eof or self._error or self._stop_flag,
+                timeout=5.0
+            )
+            
+            if not wait_success:
                     if self._buffer_size > 0:
-                        break
-                    # Se não tem NADA, continuamos no loop ou falhamos se retry_count da thread estiver alto
+                        pass # Sai do loop e envia o que tiver
+                    else: # Se o timeout expirou e não há NADA no buffer, é um erro.
+                        self._error = Exception("Timeout: Nenhum dado recebido em 5 segundos.")
                     
             if not self._buffer and (self._eof or self._error):
                 if self._error:

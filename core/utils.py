@@ -38,10 +38,9 @@ def remove_kodi_formatting(text):
     """Remove as tags de formatação do Kodi ([B], [COLOR], etc.) de uma string."""
     if not isinstance(text, str):
         return text
-    # Regex mais robusta para remover tags como [B], [/B], [COLOR xxx], [/COLOR], etc.
-    # Agora lida com tags coladas [B][COLOR] e tags sem espaço.
-    # Adicionado [CR] que o Kodi usa para Carriage Return.
-    clean_text = re.sub(r'\[/?(?:B|I|COLOR|UPPERCASE|LOWERCASE|CAPITALIZE|LIGHT|SUB|SUP|FADE|SCROLL|LEFT|RIGHT|CENTER|JUSTIFY|font|char|CR|COLOR)\b[^\]]*\]', '', text, flags=re.IGNORECASE)
+    # Regex aprimorada para remover tags como [B], [/B], [COLOR=yellow], [COLOR yellow], [COLOR FFFFFFFF] etc.
+    # Também remove [CR] (quebra de linha) e outras tags comuns.
+    clean_text = re.sub(r'\[/?(B|I|COLOR|UPPERCASE|LOWERCASE|CAPITALIZE|LIGHT|SUB|SUP|FADE|SCROLL|LEFT|RIGHT|CENTER|JUSTIFY|font|char|CR|COLOR)(?:\s[^\]]*)?\]', '', text, flags=re.IGNORECASE)
     # Remove espaços duplos que podem surgir após a remoção de tags
     clean_text = re.sub(r'\s+', ' ', clean_text).strip()
     return clean_text
