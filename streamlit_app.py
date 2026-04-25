@@ -381,13 +381,22 @@ with st.sidebar:
         st.markdown("---")
         with st.expander("🚀 Configurações de Cache", expanded=False):
             from core.utils import load_memory, save_memory
+
+            def find_closest_value(options, value):
+                """Encontra o valor mais próximo em uma lista de opções."""
+                return min(options, key=lambda x: abs(x - value))
+
             mem = load_memory()
             
             st.caption("Ajuste a performance do buffer para streams (TS/M3U8).")
             
+            chunk_options = [32, 64, 128, 256, 512, 1024]
+            current_chunk_kb = int(mem.get('cache_config', {}).get('chunk_size_kb', 64))
+            valid_chunk_kb = find_closest_value(chunk_options, current_chunk_kb)
+
             c_mem = st.slider("Tamanho do Buffer (MB):", 16, 128, int(mem.get('cache_config', {}).get('buffer_size_mb', 64)), step=8, help="RAM dedicada para buffering antecipado.")
             c_factor = st.slider("Fator de Leitura (Velocidade):", 1, 20, int(mem.get('cache_config', {}).get('read_factor', 4)), help="Multiplicador da velocidade de download em relação ao bitrate.")
-            c_chunk = st.select_slider("Tamanho do Bloco (KB):", options=[32, 64, 128, 256, 512, 1024], value=int(mem.get('cache_config', {}).get('chunk_size_kb', 64)), help="Ideal 1MB para links de alta qualidade (FHD/UHD).")
+            c_chunk = st.select_slider("Tamanho do Bloco (KB):", options=chunk_options, value=valid_chunk_kb, help="Ideal 1MB para links de alta qualidade (FHD/UHD).")
             
             if st.button("Aplicar Configurações"):
                 mem['cache_config'] = {

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<addon id="plugin.video.comandoplay" name="ComandoPlay" version="1.0.4" provider-name="Antigravity">
+  <requires>
+    <import addon="xbmc.python" version="3.0.0"/>
+    <import addon="script.module.requests" version="2.25.1"/>
+    <import addon="script.module.beautifulsoup4" version="4.9.3"/>
+    <import addon="inputstream.adaptive" version="19.0.0" optional="true"/>
+  </requires>
+  <extension point="xbmc.python.pluginsource" library="main.py">
+    <provides>video</provides>
+  </extension>
+  <extension point="xbmc.addon.metadata">
+    <summary lang="en_GB">Plugin for ComandoPlay</summary>
+    <description lang="en_GB">Watch movies and series from ComandoPlay. O sistema tentará baixar e instalar automaticamente as libs necessárias (requests, beautifulsoup4). Requer InputStream Adaptive ativado para tocar vídeos HLS.</description>
+    <platform>all</platform>
+    <assets>
+      <icon>icon.png</icon>
+      <fanart>fanart.png</fanart>
+    </assets>
+  </extension>
+</addon>
