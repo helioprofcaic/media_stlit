@@ -340,6 +340,7 @@ class MockXBMC:
                     "artist": info.get('artist'),
                     "plot": info.get('plot'),
                     "icon": art.get('icon') or art.get('thumb'),
+                    "fanart": art.get('fanart'),
                     "type": getattr(target_listitem, 'media_type', 'video'),
                     "subtitles": getattr(target_listitem, 'subtitles', [])
                 }
@@ -350,6 +351,7 @@ class MockXBMC:
                     data["media_info"] = {
                         "title": urllib.parse.unquote(params.get('title', '') or params.get('name', '')),
                         "artist": urllib.parse.unquote(params.get('artist', '')),
+                        "plot": urllib.parse.unquote(params.get('description', '') or params.get('plot', '')),
                         "icon": urllib.parse.unquote(params.get('icon', '') or params.get('thumb', '')),
                         "type": params.get('type', 'video')
                     }
@@ -475,7 +477,6 @@ class MockXBMCGUI:
         def create(self, heading, message=""): pass
         def update(self, percent, line1="", line2="", line3=""): pass
         def close(self): pass
-        def iscanceled(self): return False
 
     class DialogProgressBG:
         def create(self, heading, message=""): pass
@@ -483,9 +484,32 @@ class MockXBMCGUI:
         def close(self): pass
         def isFinished(self): return True
 
+    class Control:
+        def __init__(self, *args, **kwargs): pass
+        def setVisible(self, visible): pass
+        def setEnabled(self, enabled): pass
+        def setLabel(self, label): pass
+        def setPosition(self, x, y): pass
+        def setWidth(self, width): pass
+        def setHeight(self, height): pass
+
+    class ControlLabel(Control): pass
+    class ControlButton(Control): pass
+    class ControlImage(Control): pass
+    class ControlTextBox(Control): pass
+    class ControlList(Control): 
+        def addItem(self, item): pass
+        def addItems(self, items): pass
+
     class Window:
         def __init__(self, windowId):
             self.id = windowId
+        def show(self): pass
+        def close(self): pass
+        def doModal(self): pass
+        def addControl(self, control): pass
+        def addControls(self, controls): pass
+        def getControl(self, controlId): return MockXBMCGUI.Control()
         def getProperty(self, key):
             props = get_window_props()
             val = props.get(f"{self.id}_{key}", "")
@@ -504,11 +528,19 @@ class MockXBMCGUI:
             if k in props:
                 del props[k]
         def getFocusId(self): return 0
-        def getControl(self, id): return None
+        def setFocusId(self, id): pass
 
-    class WindowXMLDialog(Window):
+    class WindowDialog(Window):
+        def __init__(self, windowId=-1):
+            super().__init__(windowId)
+
+    class WindowXML(Window):
         def __init__(self, xmlFilename, scriptPath, defaultSkin='Default', forceFallback='Default'):
-            pass
+             super().__init__(10000)
+
+    class WindowXMLDialog(WindowXML):
+        def __init__(self, xmlFilename, scriptPath, defaultSkin='Default', forceFallback='Default'):
+            super().__init__(xmlFilename, scriptPath, defaultSkin, forceFallback)
         def doModal(self): pass
         def close(self): pass
 
@@ -623,6 +655,7 @@ class MockXBMCPlugin:
             "artist": info.get('artist'),
             "plot": info.get('plot'),
             "icon": art.get('icon') or art.get('thumb'),
+            "fanart": art.get('fanart'),
             "type": getattr(listitem, 'media_type', 'video'),
             "subtitles": getattr(listitem, 'subtitles', [])
         }
@@ -864,6 +897,21 @@ class MockRouting:
             
             print(f"[MockRouting] 404 Not Found: {path}")
 
+class MockYouTube:
+    @staticmethod
+    def resolve(url):
+        return url
+    
+    class dl:
+        @staticmethod
+        def resolve(url):
+            return url
+
+class MockSLProxy:
+    class SLProxy_Helper:
+        def resolve_url(self, url): return url
+        def playSLink(self, url, item): pass
+
 class MockResolveURL:
     @staticmethod
     def resolve(url):
@@ -902,6 +950,7 @@ class MockXBMCAddon:
             self.profile_path = os.path.join(DATA_DIR, "userdata", "addon_data", self.id)
             self.settings_file = os.path.join(self.profile_path, "settings.json")
             self._settings = {}
+            self._read_addon_xml()
             self._load_settings()
 
         def _load_settings(self):
@@ -921,6 +970,24 @@ class MockXBMCAddon:
             except:
                 pass
 
+        def _read_addon_xml(self):
+            """Lê metadados reais do addon.xml (Nome, Versão) para comportamento correto."""
+            self._addon_name = self.id
+            self._addon_version = "1.0.0"
+            
+            # Busca nas pastas conhecidas de addons
+            for base in [ADDONS_DIR, PLUGINS_REPO_DIR]:
+                xml_path = os.path.join(base, self.id, 'addon.xml')
+                if os.path.exists(xml_path):
+                    try:
+                        with open(xml_path, 'r', encoding='utf-8', errors='ignore') as f:
+                            content = f.read()
+                        root = ET.fromstring(content)
+                        self._addon_name = root.get('name', self.id)
+                        self._addon_version = root.get('version', "1.0.0")
+                        break
+                    except: pass
+
         def getAddonInfo(self, id):
             if id == 'profile':
                 if not os.path.exists(self.profile_path):
@@ -933,9 +1000,9 @@ class MockXBMCAddon:
                     
                 return self.profile_path
             if id == 'id': return self.id
-            if id == 'name': return self.id
+            if id == 'name': return self._addon_name
             if id == 'path': return MockXBMCVFS.translatePath(f"special://home/addons/{self.id}")
-            if id == 'version': return "1.0.0"
+            if id == 'version': return self._addon_version
             if id == 'icon': 
                 # Tenta encontrar o ícone na pasta de addons instalados
                 icon_path = os.path.join(ADDONS_DIR, self.id, "icon.png")
@@ -975,15 +1042,24 @@ class MockXBMCAddon:
             if any(x in id_lower for x in ['cache', 'buffer']):
                 return "100"
 
-            if any(x in id_lower for x in ['limit', 'count', 'items', 'page', 'time', 'duration', 'width', 'height', 'cache', 'buffer', 'port', 'num', 'max', 'min', 'size', 'interval', 'timeout', 'level', 'bitrate', 'view', 'mode', 'depth', 'current', 'total', 'progress']):
+            if any(x in id_lower for x in ['limit', 'count', 'items', 'page', 'time', 'duration', 'progress', 'id', 'number', 'width', 'height', 'cache', 'buffer', 'port', 'num', 'max', 'min', 'size', 'interval', 'timeout', 'level', 'bitrate', 'view', 'mode', 'depth', 'current', 'total', 'progress']):
                 return "20"
             
             if any(x in id_lower for x in ['enable', 'show', 'use', 'hide', 'active', 'auto', 'local_only_client']):
                 return "true"
             
+            # Heurísticas para plugins de IPTV BR (ex: FaustinoTV)
+            if any(x in id_lower for x in ['adult', 'uhdtv', 'fhdtv', 'hdtv', 'sdtv']):
+                return "true" # Mostra todas as qualidades/categorias por padrão
+            if 'filtrar' in id_lower:
+                return "false" # Desabilita filtros por padrão
+
             # Silencia warnings para configurações comuns de plugins BR
-            if any(x in id_lower for x in ['opt', 'extra', 'layout', 'favoritos', 'player', 'ffmpeg']):
+            if any(x in id_lower for x in ['opt', 'extra', 'layout', 'favoritos', 'player', 'ffmpeg', 'debug', 'browse_community', 'add_playlist']):
                 return "0"
+
+            if id == 'parentalblocked' or id == 'donotshowbychannels':
+                return "false"
                 
             # Configurações específicas do Elementum
             if id == 'remote_host': return "127.0.0.1"
@@ -1006,7 +1082,7 @@ class MockXBMCAddon:
                 return "linux_x64"
 
             # Retorna string vazia para campos de texto/credenciais para evitar "0"
-            if any(x in id_lower for x in ['user', 'name', 'email', 'login', 'token', 'key', 'url', 'path', 'search', 'query', 'pass', 'epg', 'pais', 'host']):
+            if any(x in id_lower for x in ['user', 'name', 'email', 'login', 'token', 'key', 'url', 'path', 'search', 'query', 'pass', 'epg', 'pais', 'host', 'proxy']):
                 return ""
 
             print(f"[WARNING] getSetting('{id}') não encontrado. Retornando '0' como padrão para evitar crash.")
@@ -1038,11 +1114,20 @@ def setup_mocks():
             pass
 
     # Atualiza sempre os módulos para evitar incompatibilidade de classes (reload do Streamlit)
-    sys.modules['xbmc'] = MockXBMC
-    sys.modules['xbmcgui'] = MockXBMCGUI
-    sys.modules['xbmcplugin'] = MockXBMCPlugin
-    sys.modules['xbmcaddon'] = MockXBMCAddon
-    sys.modules['xbmcvfs'] = MockXBMCVFS
+    sys.modules["xbmc"] = MockXBMC
+    sys.modules["xbmcgui"] = MockXBMCGUI
+    sys.modules["xbmcplugin"] = MockXBMCPlugin
+    sys.modules["xbmcvfs"] = MockXBMCVFS
+    sys.modules["xbmcaddon"] = MockXBMCAddon
+    sys.modules["resolveurl"] = MockResolveURL
+    sys.modules["urlresolver"] = MockResolveURL
+    sys.modules["metahandler"] = MockMetaHandler
+    sys.modules["youtube"] = MockYouTube
+    sys.modules["youtube.dl"] = MockYouTube.dl
+    sys.modules["slproxy"] = MockSLProxy
+    sys.modules["dsp"] = MockSLProxy # Reusa a classe como módulo
+    sys.modules["dsp.streamlink_proxy"] = MockSLProxy
+    sys.modules["websocket"] = MockSLProxy
 
     # Atualiza kodi_six
     kodi_six = sys.modules.get('kodi_six', type(sys)('kodi_six'))
@@ -1051,16 +1136,25 @@ def setup_mocks():
     kodi_six.xbmcplugin = MockXBMCPlugin
     kodi_six.xbmcaddon = MockXBMCAddon
     kodi_six.xbmcvfs = MockXBMCVFS
+    
+    # Funções utilitárias do kodi_six (necessárias na raiz para alguns plugins)
+    py2_decode = lambda s: s.decode('utf-8') if isinstance(s, bytes) else s
+    py2_encode = lambda s: s.encode('utf-8') if isinstance(s, str) else s
+    
+    kodi_six.py2_decode = py2_decode
+    kodi_six.py2_encode = py2_encode
+    kodi_six.PY2 = sys.version_info[0] == 2
+    kodi_six.PY3 = sys.version_info[0] == 3
+    
     sys.modules['kodi_six'] = kodi_six
     
     # Mock para kodi_six.utils
     if 'kodi_six.utils' not in sys.modules:
         kodi_six_utils = type(sys)('kodi_six.utils')
-        # py2_decode é usado para garantir unicode em Py2, em Py3 str já é unicode
-        kodi_six_utils.py2_decode = lambda s: s.decode('utf-8') if isinstance(s, bytes) else s
-        kodi_six_utils.py2_encode = lambda s: s.encode('utf-8') if isinstance(s, str) else s
-        kodi_six_utils.PY2 = sys.version_info[0] == 2
-        kodi_six_utils.PY3 = sys.version_info[0] == 3
+        kodi_six_utils.py2_decode = py2_decode
+        kodi_six_utils.py2_encode = py2_encode
+        kodi_six_utils.PY2 = kodi_six.PY2
+        kodi_six_utils.PY3 = kodi_six.PY3
         sys.modules['kodi_six.utils'] = kodi_six_utils
         kodi_six.utils = kodi_six_utils
 
@@ -1089,6 +1183,20 @@ def setup_mocks():
         
     if 'metahandler' not in sys.modules:
         sys.modules['metahandler'] = MockMetaHandler
+
+    if 'elementum' not in sys.modules:
+        # Mock elementum module required by script.elementum.burst
+        elementum = type(sys)('elementum')
+        elementum.provider = type(sys)('elementum.provider')
+        
+        # Funções esperadas pelo Burst
+        elementum.provider.log = lambda msg, level=0: print(f"[BURST] {msg}")
+        elementum.provider.get_setting = lambda key, default="": "true"
+        elementum.provider.set_setting = lambda key, val: None
+        elementum.provider.append_headers = lambda headers: headers
+        
+        sys.modules['elementum'] = elementum
+        sys.modules['elementum.provider'] = elementum.provider
 
 def run_plugin(plugin_path, param_string="", dialog_answers=None):
     """Executa o plugin e retorna os itens ou a URL resolvida."""
@@ -1134,6 +1242,9 @@ def run_plugin(plugin_path, param_string="", dialog_answers=None):
         # Isso evita o spam de "Starting new HTTP connection" e "GET /hls/..." no terminal
         logging.getLogger("urllib3").setLevel(logging.WARNING)
         logging.getLogger("requests").setLevel(logging.WARNING)
+        
+        # Silencia logs de cache (requests_cache) e outros infos do root
+        logging.getLogger().setLevel(logging.WARNING)
 
         # --- Supressão de Erros de DLL no Windows (Bad Image Callbacks) ---
         if sys.platform == 'win32':
@@ -1156,10 +1267,7 @@ def run_plugin(plugin_path, param_string="", dialog_answers=None):
                     _orig_init(self, *args, **kwargs)
                     # Define um User-Agent de navegador moderno
                     self.headers['User-Agent'] = MockXBMC.getUserAgent()
-                    # Reduz retries para evitar travamentos longos (padrão é 3)
-                    # adapter = HTTPAdapter(max_retries=0)
-                    self.mount("http://", adapter)
-                    self.mount("https://", adapter)
+
                     # --- Estratégia de Retry Robusta ---
                     # Para lidar com conexões instáveis de IPTV (erros 10053, 5xx, etc)
                     retry_strategy = Retry(
@@ -1169,6 +1277,8 @@ def run_plugin(plugin_path, param_string="", dialog_answers=None):
                         allowed_methods=["HEAD", "GET", "OPTIONS"]
                     )
                     adapter = HTTPAdapter(max_retries=retry_strategy)
+                    self.mount("http://", adapter)
+                    self.mount("https://", adapter)
                 requests.Session.__init__ = _new_init
                 requests.Session._ua_patched = True
         
@@ -1287,7 +1397,7 @@ def run_plugin(plugin_path, param_string="", dialog_answers=None):
                             dep_path = os.path.join(addons_parent, dep_id)
                             if os.path.exists(dep_path):
                                 # Adiciona pastas de biblioteca do addon dependente (raiz, lib, modules)
-                                for sub in ['', 'lib', 'modules', 'resources/lib']:
+                                for sub in ['', 'lib', 'modules', 'resources/lib', 'resources/site-packages']:
                                     dep_lib = os.path.join(dep_path, sub)
                                     if os.path.exists(dep_lib) and dep_lib not in paths_to_add:
                                         paths_to_add.append(dep_lib)
@@ -1353,10 +1463,13 @@ def run_plugin(plugin_path, param_string="", dialog_answers=None):
                 
         except DialogSelectError as e:
             print(f"[BRIDGE] Interrompido para seleção: {e.heading}")
+            simple_options = [item.getLabel() if hasattr(item, 'getLabel') else str(item) for item in e.options]
             return {
+                "dialog_type": "select",
+                "heading": e.heading,
+                "options": simple_options,
                 "items": [
                     {
-                        "label": f"{item}",
                         "label": item.getLabel() if hasattr(item, 'getLabel') else str(item),
                         "url": f"resume:select:{i}",
                         "isFolder": False,

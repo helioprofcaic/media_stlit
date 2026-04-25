@@ -22,7 +22,8 @@ O projeto utiliza uma arquitetura de **Mocking** (Simulação) para executar plu
 
 3.  **Desktop Player (`video_player.py`)**:
     *   Frontend Desktop usando PyQt6.
-    *   Possui um `StreamBuffer` personalizado para lidar com streaming HTTP que exige headers específicos (User-Agent, Referer), algo que o `QMediaPlayer` padrão não faz nativamente.
+    *   Utiliza `QMediaPlayer` para reprodução de mídias.
+    *   **`StreamBuffer` (`stream_buffer.py`)**: Componente crucial que atua como um intermediário para o `QMediaPlayer`. Ele usa a biblioteca `requests` para baixar streams que exigem **headers HTTP customizados** (ex: `User-Agent`), uma funcionalidade que o `QMediaPlayer` não suporta nativamente. O `StreamBuffer` baixa o conteúdo em uma thread separada e o serve para o player, permitindo a reprodução de links protegidos. Ele também implementa busca (seeking) através de *HTTP Range Requests*.
 
 4.  **Google Storage (`google_storage.py`)**:
     *   Gerencia a conexão com a API do Google Drive.

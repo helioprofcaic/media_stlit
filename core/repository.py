@@ -7,12 +7,12 @@ import io
 import xml.etree.ElementTree as ET
 import os
 import shutil
-from core.utils import log_to_file, ADDONS_DIR, PLUGINS_REPO_DIR
+from core.utils import log_to_file, ADDONS_DIR, PLUGINS_REPO_DIR, remove_kodi_formatting
 
 # Tenta importar PyQt6 apenas se necessário, para permitir uso em ambientes sem GUI (Streamlit)
 try:
     from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, 
-                                 QPushButton, QListWidget, QListWidgetItem, QMessageBox, QInputDialog, QApplication)
+                                 QPushButton, QListWidget, QListWidgetItem, QMessageBox, QInputDialog, QApplication, QMenu)
     from PyQt6.QtCore import Qt
     HAS_QT = True
     from core.update_addons_xml import fetch_and_update_addons_xml
@@ -29,7 +29,7 @@ def parse_addons_xml(xml_content, base_url):
         # mas simplificaremos para retornar os addons diretos
         for addon in root.findall('addon'):
             addon_id = addon.get('id')
-            name = addon.get('name')
+            name = remove_kodi_formatting(addon.get('name'))
             version = addon.get('version')
             zip_url = f"{base_url}{addon_id}/{addon_id}-{version}.zip"
             addons_data.append({
@@ -88,6 +88,8 @@ class RepositoryBrowser(QDialog):
         
         # Lista de Addons
         self.addons_list = QListWidget()
+        self.addons_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.addons_list.customContextMenuRequested.connect(self.show_context_menu)
         layout.addWidget(self.addons_list)
         
         # Botão Instalar
@@ -98,6 +100,72 @@ class RepositoryBrowser(QDialog):
         
         self.status_label = QLabel("Selecione um repositório e clique em Carregar.")
         layout.addWidget(self.status_label)
+
+    def show_context_menu(self, position):
+        item = self.addons_list.itemAt(position)
+        if not item:
+            return
+            
+        data = item.data(Qt.ItemDataRole.UserRole)
+        addon_id = data.get('id')
+        name = data.get('name')
+        
+        menu = QMenu()
+        
+        details_action = menu.addAction("Ver Detalhes")
+        
+        # Verifica se está instalado para mostrar opção de desinstalar
+        installed_path = os.path.join(ADDONS_DIR, addon_id)
+        if os.path.exists(installed_path):
+            menu.addSeparator()
+            uninstall_action = menu.addAction("Desinstalar")
+        else:
+            uninstall_action = None
+            
+        menu.addSeparator()
+        install_action = menu.addAction("Instalar/Atualizar")
+        
+        action = menu.exec(self.addons_list.mapToGlobal(position))
+        
+        if action == details_action:
+            self.show_addon_details(data)
+        elif uninstall_action and action == uninstall_action:
+            self.uninstall_addon(addon_id, name)
+        elif action == install_action:
+            self.install_addon()
+
+    def show_addon_details(self, data):
+        installed_path = os.path.join(ADDONS_DIR, data.get('id'))
+        status = "Instalado" if os.path.exists(installed_path) else "Não Instalado"
+        
+        description = data.get('description', '').strip()
+        news = data.get('news', '').strip()
+
+        info = f"Nome: {data.get('name')}\nID: {data.get('id')}\nVersão: {data.get('version', 'N/A')}\nStatus: {status}"
+        
+        if description:
+            info += f"\n\nDescrição:\n{description}"
+        
+        if news:
+            info += f"\n\nNovidades:\n{news}"
+
+        QMessageBox.information(self, "Detalhes do Addon", info)
+
+    def uninstall_addon(self, addon_id, name):
+        reply = QMessageBox.question(self, 'Desinstalar', 
+                                     f"Tem certeza que deseja desinstalar '{name}'?\nIsso apagará a pasta em data/addons/{addon_id}",
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+
+        if reply == QMessageBox.StandardButton.Yes:
+            target = os.path.join(ADDONS_DIR, addon_id)
+            try:
+                if os.path.exists(target):
+                    shutil.rmtree(target)
+                    QMessageBox.information(self, "Sucesso", f"'{name}' foi desinstalado.")
+                else:
+                    QMessageBox.warning(self, "Aviso", "O addon não foi encontrado (talvez já removido).")
+            except Exception as e:
+                QMessageBox.critical(self, "Erro", f"Erro ao desinstalar: {e}")
 
     def scan_installed_repos(self):
         """Escaneia addons instalados para encontrar repositórios e adicioná-los à lista."""
@@ -304,15 +372,28 @@ class RepositoryBrowser(QDialog):
 
             for addon in root.findall('addon'):
                 addon_id = addon.get('id')
-                name = addon.get('name')
+                name = remove_kodi_formatting(addon.get('name'))
                 version = addon.get('version')
+
+                # Captura descrição e novidades
+                description = ""
+                news = ""
+                metadata_ext = addon.find("extension[@point='xbmc.addon.metadata']")
+                if metadata_ext is not None:
+                    desc_node = metadata_ext.find('description')
+                    if desc_node is not None and desc_node.text:
+                        description = remove_kodi_formatting(desc_node.text.strip())
+                    
+                    news_node = metadata_ext.find('news')
+                    if news_node is not None and news_node.text:
+                        news = remove_kodi_formatting(news_node.text.strip())
                 
                 item_text = f"{name} ({version}) - {addon_id}"
                 item = QListWidgetItem(item_text)
                 # Salva dados para instalação: URL do zip padrão do Kodi
                 # Formato: repo/id/id-version.zip
                 zip_url = f"{base_url}{addon_id}/{addon_id}-{version}.zip"
-                item.setData(Qt.ItemDataRole.UserRole, {'id': addon_id, 'url': zip_url, 'name': name})
+                item.setData(Qt.ItemDataRole.UserRole, {'id': addon_id, 'url': zip_url, 'name': name, 'version': version, 'description': description, 'news': news})
                 self.addons_list.addItem(item)
             
             count = self.addons_list.count()
@@ -344,12 +425,25 @@ class RepositoryBrowser(QDialog):
                                 xml_content = f.read()
                             root = ET.fromstring(xml_content)
                             addon_id = root.get('id')
-                            name = root.get('name')
+                            name = remove_kodi_formatting(root.get('name'))
                             version = root.get('version')
                             
+                            # Captura descrição e novidades
+                            description = ""
+                            news = ""
+                            metadata_ext = root.find("extension[@point='xbmc.addon.metadata']")
+                            if metadata_ext is not None:
+                                desc_node = metadata_ext.find('description')
+                                if desc_node is not None and desc_node.text:
+                                    description = remove_kodi_formatting(desc_node.text.strip())
+                                
+                                news_node = metadata_ext.find('news')
+                                if news_node is not None and news_node.text:
+                                    news = remove_kodi_formatting(news_node.text.strip())
+
                             item_text = f"{name} ({version}) - {addon_id} [LOCAL]"
                             item = QListWidgetItem(item_text)
-                            item.setData(Qt.ItemDataRole.UserRole, {'id': addon_id, 'url': item_path, 'name': name, 'is_local': True})
+                            item.setData(Qt.ItemDataRole.UserRole, {'id': addon_id, 'url': item_path, 'name': name, 'version': version, 'is_local': True, 'description': description, 'news': news})
                             self.addons_list.addItem(item)
                             count += 1
                         except Exception as e:

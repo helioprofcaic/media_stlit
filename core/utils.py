@@ -38,10 +38,12 @@ def remove_kodi_formatting(text):
     """Remove as tags de formatação do Kodi ([B], [COLOR], etc.) de uma string."""
     if not isinstance(text, str):
         return text
-    # Regex para remover tags como [B], [/B], [COLOR xxx], [/COLOR], [I], [/I] etc.
-    # A regex é case-insensitive.
-    # Adicionado \b para garantir que não pegue palavras que contenham as letras das tags.
-    clean_text = re.sub(r'\[/?(B|I|COLOR|UPPERCASE|LOWERCASE|CAPITALIZE|LIGHT|SUB|SUP|FADE|SCROLL|LEFT|RIGHT|CENTER|JUSTIFY|font|char|CR)\b[^\]]*\]', '', text, flags=re.IGNORECASE)
+    # Regex mais robusta para remover tags como [B], [/B], [COLOR xxx], [/COLOR], etc.
+    # Agora lida com tags coladas [B][COLOR] e tags sem espaço.
+    # Adicionado [CR] que o Kodi usa para Carriage Return.
+    clean_text = re.sub(r'\[/?(?:B|I|COLOR|UPPERCASE|LOWERCASE|CAPITALIZE|LIGHT|SUB|SUP|FADE|SCROLL|LEFT|RIGHT|CENTER|JUSTIFY|font|char|CR|COLOR)\b[^\]]*\]', '', text, flags=re.IGNORECASE)
+    # Remove espaços duplos que podem surgir após a remoção de tags
+    clean_text = re.sub(r'\s+', ' ', clean_text).strip()
     return clean_text
 
 def load_memory():
@@ -52,7 +54,17 @@ def load_memory():
                 return json.load(f)
         except Exception as e:
             log_to_file(f"Erro ao carregar memória: {e}")
-    return {"recent_plugins": [], "last_plugin": "", "last_directory": "", "last_video": ""}
+    return {
+        "recent_plugins": [], 
+        "last_plugin": "", 
+        "last_directory": "", 
+        "last_video": "",
+        "cache_config": {
+            "buffer_size_mb": 64,   # MB (Padrão 64, suporta até 128)
+            "read_factor": 4,      # Fator de download (Padrão 4x, suporta até 20x)
+            "chunk_size_kb": 64    # KB (Padrão 64, suporta até 1024)
+        }
+    }
 
 def save_memory(memory):
     """Salva configurações no disco."""

@@ -376,6 +376,28 @@ with st.sidebar:
                         st.caption(f"Pasta Raiz: `{fid}`" if fid else "⚠️ Pasta Raiz não configurada")
                     else:
                         st.error("❌ Falha na conexão.")
+        
+        # --- Configurações de Cache (Estilo Kodi) ---
+        st.markdown("---")
+        with st.expander("🚀 Configurações de Cache", expanded=False):
+            from core.utils import load_memory, save_memory
+            mem = load_memory()
+            
+            st.caption("Ajuste a performance do buffer para streams (TS/M3U8).")
+            
+            c_mem = st.slider("Tamanho do Buffer (MB):", 16, 128, int(mem.get('cache_config', {}).get('buffer_size_mb', 64)), step=8, help="RAM dedicada para buffering antecipado.")
+            c_factor = st.slider("Fator de Leitura (Velocidade):", 1, 20, int(mem.get('cache_config', {}).get('read_factor', 4)), help="Multiplicador da velocidade de download em relação ao bitrate.")
+            c_chunk = st.select_slider("Tamanho do Bloco (KB):", options=[32, 64, 128, 256, 512, 1024], value=int(mem.get('cache_config', {}).get('chunk_size_kb', 64)), help="Ideal 1MB para links de alta qualidade (FHD/UHD).")
+            
+            if st.button("Aplicar Configurações"):
+                mem['cache_config'] = {
+                    'buffer_size_mb': c_mem,
+                    'read_factor': c_factor,
+                    'chunk_size_kb': c_chunk
+                }
+                save_memory(mem)
+                st.success("Configurações salvas!")
+                st.info("As mudanças serão aplicadas no próximo vídeo carregado.")
 
 # Área Principal
 
@@ -788,7 +810,8 @@ if st.session_state.history:
         st.error(f"❌ Erro no Plugin: {st.session_state.last_error}")
         
     if st.session_state.dialog_heading:
-        st.info(f"👉 Selecione: **{st.session_state.dialog_heading}**")
+        clean_heading = remove_kodi_formatting(st.session_state.dialog_heading)
+        st.info(f"👉 Selecione: **{clean_heading}**")
     
     with st.expander("📂 Navegador de Arquivos", expanded=not is_viewing_content):
             

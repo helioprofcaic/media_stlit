@@ -1,8 +1,32 @@
 {
     "recent_plugins": [
-       
+        "B:\\Local\\Dev\\media_stlit\\data\\addons\\plugin.audio.estudioKazaFM\\default.py",
+        "B:\\Local\\Dev\\media_stlit\\data\\addons\\plugin.video.youtube_simple\\main.py",
+        "B:\\Local\\Dev\\media_stlit\\data\\addons\\plugin.audio.RadioBrower\\main.py",
+        "B:\\Local\\Dev\\media_stlit\\data\\addons\\plugin.video.OnePlay\\default.py",
+        "B:\\Local\\Dev\\media_stlit\\data\\addons\\plugin.video.BrazucaPlay\\default.py",
+        "B:\\Local\\Dev\\media_stlit\\data\\addons\\plugin.video.local_explorer\\main.py",
+        "B:\\Local\\Dev\\media_stlit\\plugin\\plugin.audio.RadioBrower\\main.py",
+        "B:\\Local\\Dev\\media_stlit\\data\\addons\\plugin.video.faustinotv\\faustinotv.py",
+        "B:\\Local\\Dev\\media_stlit\\data\\addons\\plugin.video.BrazucaPlay.Matrix\\default.py",
+        "B:\\Local\\Dev\\media_stlit\\data\\addons\\plugin.video.elementum\\navigation.py",
+        "B:\\Local\\Dev\\media_stlit\\plugin\\plugin.video.tube8_explore\\main.py",
+        "B:\\Local\\Dev\\media_stlit\\data\\addons\\plugin.video.Addon.BXL\\default.py",
+        "B:\\Local\\Dev\\media_stlit\\data\\addons\\plugin.video.musicando\\default.py",
+        "B:\\Local\\Dev\\media_stlit\\data\\addons\\plugin.video.year-explorer\\addon.py",
+        "B:\\Local\\Dev\\media_stlit\\data\\addons\\plugin.video.f4mTester\\default.py",
+        "B:\\Local\\Dev\\media_stlit\\plugin\\plugin.video.Addon.BXL\\default.py",
+        "B:\\Local\\Dev\\media_stlit\\data\\addons\\plugin.video.xvideos_explore\\main.py",
+        "B:\\Local\\Dev\\media_stlit\\data\\addons\\plugin.video.pluginstreaming\\default.py",
+        "B:\\Local\\Dev\\media_stlit\\data\\addons\\plugin.video.VikingsFREE\\default.py",
+        "B:\\Local\\Dev\\media_stlit\\data\\addons\\plugin.video.viking.tv.online\\default.py"
     ],
-    "last_plugin": "",
-    "last_directory": "",
-    "last_video": ""
+    "last_plugin": "B:\\Local\\Dev\\media_stlit\\data\\addons\\plugin.video.viking.tv.online\\default.py",
+    "last_directory": "B:/Local/Dev/media_stlit/plugin",
+    "last_video": "resume:select:0",
+    "cache_config": {
+        "buffer_size_mb": 100,
+        "read_factor": 15,
+        "chunk_size_kb": 96
+    }
 }

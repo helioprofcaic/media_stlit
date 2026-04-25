@@ -25,27 +25,78 @@ try:
                                  QHBoxLayout, QPushButton, QFileDialog, QSlider, 
                                  QLabel, QStyle, QMessageBox, QListWidget, QListWidgetItem,
                                  QDialog, QComboBox, QInputDialog)
-    from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput, QVideoSink
-    from PyQt6.QtCore import Qt, QUrl, QTime, QEvent, QIODevice, pyqtSignal, QThread, QObject
-    from PyQt6.QtGui import QPainter, QImage, QBrush, QColor, QIcon
+    from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput, QVideoSink, QMediaMetaData
+    from PyQt6.QtCore import Qt, QUrl, QTime, QEvent, QIODevice, pyqtSignal, QThread, QObject, QMetaObject, Q_ARG, pyqtSlot
+    from PyQt6.QtGui import QPainter, QImage, QBrush, QColor, QIcon, QPixmap
     PYQT_AVAILABLE = True
 except ImportError:
     PYQT_AVAILABLE = False
     QMainWindow = object
 
+# Adiciona importações que podem ter faltado
 if PYQT_AVAILABLE:
+    from PyQt6.QtCore import QTimer
+    from modules.qt6_ui_player import VideoPlayerUI
+
+if PYQT_AVAILABLE:
+    def get_info_from_listitem(li):
+        """Extrai um dicionário de informações de um MockListItem."""
+        if not li: return {}
+        
+        # O objeto 'li' é um MockListItem do kodi_bridge
+        info = getattr(li, 'info', {}).copy()
+        art = getattr(li, 'art', {}).copy()
+        item_type = getattr(li, 'media_type', 'video')
+        
+        # O título pode estar no label ou no info dict
+        title = info.get('title', '')
+        if not title and hasattr(li, 'getLabel'):
+            title = li.getLabel()
+
+        return {
+            "title": title,
+            "artist": info.get('artist'),
+            "plot": info.get('plot'),
+            "icon": art.get('icon') or art.get('thumb'),
+            "fanart": art.get('fanart'),
+            "type": item_type
+        }
+
     class PluginWorker(QObject):
         finished = pyqtSignal(dict)
 
-        def __init__(self, plugin_path, url, parent=None):
+        def __init__(self, plugin_path, url, dialog_answers=None, parent=None):
             super().__init__(parent)
             self.plugin_path = plugin_path
             self.url = url
-
+            self.dialog_answers = dialog_answers
+        
         def run(self):
-            """Executa o plugin em uma separada thread."""
-            data = kodi_bridge.run_plugin(self.plugin_path, self.url)
+            """Executa o plugin em uma thread separada."""
+            try:
+                # Passa o nome do addon para o kodi_bridge para que as configurações sejam salvas corretamente
+                addon_id = os.path.basename(os.path.dirname(self.plugin_path))
+                kodi_bridge.set_current_addon_id(addon_id)
+                data = kodi_bridge.run_plugin(self.plugin_path, self.url, self.dialog_answers)
+            except BaseException as e:
+                data = {"error": f"Crash irrecuperável no Plugin: {str(e)}"}
             self.finished.emit(data)
+
+    class InputHelper(QObject):
+        """Helper para executar QInputDialog na thread principal."""
+        def __init__(self):
+            super().__init__()
+            self.text = ""
+            self.confirmed = False
+
+        @pyqtSlot(str, str, str)
+        def show_input(self, title, heading, default_text):
+            parent = QApplication.activeWindow()
+            text, ok = QInputDialog.getText(parent, title, heading, text=default_text)
+            self.text = text
+            self.confirmed = ok
+            
+    _input_helper = None
 
     class PyQtKeyboard:
         """Implementação do xbmc.Keyboard usando QInputDialog do PyQt."""
@@ -55,10 +106,30 @@ if PYQT_AVAILABLE:
             self.confirmed = False
 
         def doModal(self):
-            parent = QApplication.activeWindow()
-            text, ok = QInputDialog.getText(parent, "Teclado", self.heading, text=self.text)
-            if ok:
-                self.text = text
+            global _input_helper
+            # Se já estiver na main thread, executa direto
+            if QThread.currentThread() == QApplication.instance().thread():
+                parent = QApplication.activeWindow()
+                text, ok = QInputDialog.getText(parent, "Teclado", self.heading, text=self.text)
+                if ok:
+                    self.text = text
+                    self.confirmed = True
+                else:
+                    self.confirmed = False
+                return
+
+            if _input_helper is None:
+                 print("InputHelper não inicializado.")
+                 return
+
+            QMetaObject.invokeMethod(_input_helper, "show_input",
+                                     Qt.ConnectionType.BlockingQueuedConnection,
+                                     Q_ARG(str, "Teclado"),
+                                     Q_ARG(str, self.heading),
+                                     Q_ARG(str, self.text))
+            
+            if _input_helper.confirmed:
+                self.text = _input_helper.text
                 self.confirmed = True
             else:
                 self.confirmed = False
@@ -80,11 +151,19 @@ class VideoPlayer(QMainWindow):
     notification_signal = pyqtSignal(str, str)
     # Sinal para atualizar a capa do álbum na thread da GUI
     update_cover_signal = pyqtSignal(QImage)
+    # Sinal para atualizar a imagem na sidebar de detalhes
+    update_details_image_signal = pyqtSignal(QImage)
+    # Sinal para atualizar o fundo de tela
+    update_background_signal = pyqtSignal(QPixmap)
 
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Player PyQt6 (Áudio + Vídeo + Zoom)")
         self.resize(800, 600)
+
+        global _input_helper
+        if _input_helper is None:
+            _input_helper = InputHelper()
 
         # Configura o ícone da janela principal
         icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'icon.png')
@@ -95,14 +174,16 @@ class VideoPlayer(QMainWindow):
         self.playlist = []
         self.current_index = -1
         self.playlist_width = 450
+        self.details_width = 350
         self.current_plugin_path = None # Caminho do plugin carregado
         self.stream_buffer = None # Mantém referência para o buffer atual
         self.plugin_history = [] # Histórico de navegação do plugin
         self.current_plugin_params = "" # Parâmetros atuais do plugin
+        self.pending_dialog_url = None # Armazena a URL que causou um diálogo
         self.current_media_info = {} # Metadados da mídia atual
+        self.station_name = "" # Nome da estação de rádio
         self.thread = None
         self.worker = None
-
         # Carrega a memória do player
         self.memory = load_memory()
         
@@ -117,77 +198,28 @@ class VideoPlayer(QMainWindow):
         self.notification_signal.connect(self.show_notification)
         kodi_bridge.register_notification_callback(self.notification_signal.emit)
 
+        # Registra callback para o fundo de tela
+        self.update_background_signal.connect(self.set_background_pixmap)
+        
+        # Registra callback para a imagem de detalhes
+        self.update_details_image_signal.connect(self.set_details_image)
+
         # Configuração do Player de Mídia
         self.mediaPlayer = QMediaPlayer()
         self.audioOutput = QAudioOutput()
-        self.mediaPlayer.setAudioOutput(self.audioOutput)
-        
-        # Playlist Widget (Overlay)
-        self.playlistWidget = QListWidget(self)
-        self.playlistWidget.hide()
-        self.playlistWidget.setStyleSheet("background-color: rgba(0, 0, 0, 0.8); color: white; border: none; font-size: 14px;")
-        self.playlistWidget.itemClicked.connect(self.on_playlist_clicked)
 
-        # --- Interface Gráfica (Layout) ---
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
-        layout = QVBoxLayout(central_widget)
-        layout.setContentsMargins(0, 0, 0, 0)
-        
-        # Widget de Saída de Vídeo (Substitui QVideoWidget e Overlay)
-        self.videoOutput = VideoOutputWidget(self.toggle_fullscreen, self.handle_mouse_move, self.play_video)
-        layout.addWidget(self.videoOutput)
+        # --- Construção da Interface Gráfica via Módulo Externo ---
+        self.ui = VideoPlayerUI()
+        self.ui.setup_ui(self)
+
+        # Configuração Adicional de Áudio e Vídeo
+        self.mediaPlayer.setAudioOutput(self.audioOutput)
         self.update_cover_signal.connect(self.videoOutput.set_frame)
         
         # Configura Sink para capturar frames
         self.videoSink = QVideoSink()
         self.mediaPlayer.setVideoSink(self.videoSink)
         self.videoSink.videoFrameChanged.connect(self.handle_frame)
-
-        # Controles
-        controls_layout = QHBoxLayout()
-        layout.addLayout(controls_layout)
-
-        # Botão Abrir
-        self.openBtn = QPushButton("Abrir Vídeo")
-        self.openBtn.clicked.connect(self.open_file)
-        controls_layout.addWidget(self.openBtn)
-
-        # Botão Carregar Plugin
-        self.pluginBtn = QPushButton("Carregar Plugin")
-        self.pluginBtn.clicked.connect(self.load_plugin_dialog)
-        controls_layout.addWidget(self.pluginBtn)
-
-        # Botão Repositórios
-        self.repoBtn = QPushButton("Repositórios")
-        self.repoBtn.clicked.connect(self.open_repo_browser)
-        controls_layout.addWidget(self.repoBtn)
-
-        # Botão Anterior
-        self.prevBtn = QPushButton()
-        self.prevBtn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaSkipBackward))
-        self.prevBtn.clicked.connect(self.play_previous)
-        controls_layout.addWidget(self.prevBtn)
-
-        # Botão Play/Pause
-        self.playBtn = QPushButton()
-        self.playBtn.setEnabled(False)
-        self.playBtn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
-        self.playBtn.clicked.connect(self.play_video)
-        controls_layout.addWidget(self.playBtn)
-
-        # Botão Stop
-        self.stopBtn = QPushButton()
-        self.stopBtn.setEnabled(False)
-        self.stopBtn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaStop))
-        self.stopBtn.clicked.connect(self.stop_video)
-        controls_layout.addWidget(self.stopBtn)
-
-        # Botão Próximo
-        self.nextBtn = QPushButton()
-        self.nextBtn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaSkipForward))
-        self.nextBtn.clicked.connect(self.play_next)
-        controls_layout.addWidget(self.nextBtn)
 
         # Estilo de alto contraste para os botões de mídia
         media_btn_style = """
@@ -208,28 +240,25 @@ class VideoPlayer(QMainWindow):
                 border: 1px solid #ccc;
             }
         """
-        for btn in [self.prevBtn, self.playBtn, self.stopBtn, self.nextBtn]:
+        for btn in [self.prevBtn, self.playBtn, self.stopBtn, self.nextBtn, self.settingsBtn]:
             btn.setStyleSheet(media_btn_style)
 
-        # Slider de Posição (Seekbar)
-        self.positionSlider = QSlider(Qt.Orientation.Horizontal)
-        self.positionSlider.setRange(0, 0)
+        # Conexões de Sinais da UI
+        self.playlistWidget.itemClicked.connect(self.on_playlist_clicked)
+        self.playlistWidget.currentItemChanged.connect(self.on_playlist_selection_changed)
+        self.openBtn.clicked.connect(self.open_file)
+        self.pluginBtn.clicked.connect(self.load_plugin_dialog)
+        self.repoBtn.clicked.connect(self.open_repo_browser)
+        self.prevBtn.clicked.connect(self.play_previous)
+        self.playBtn.clicked.connect(self.play_video)
+        self.stopBtn.clicked.connect(self.stop_video)
+        self.nextBtn.clicked.connect(self.play_next)
+        self.settingsBtn.clicked.connect(self.open_settings_dialog)
         self.positionSlider.sliderMoved.connect(self.set_position)
-        controls_layout.addWidget(self.positionSlider)
-
-        # Label de Tempo
-        self.timeLabel = QLabel("00:00")
-        controls_layout.addWidget(self.timeLabel)
-
-        # Slider de Volume
-        self.volumeSlider = QSlider(Qt.Orientation.Horizontal)
-        self.volumeSlider.setRange(0, 100)
-        self.volumeSlider.setValue(70)
-        self.audioOutput.setVolume(0.7) # 0.0 a 1.0
         self.volumeSlider.valueChanged.connect(self.set_volume)
-        self.volumeSlider.setFixedWidth(100)
-        controls_layout.addWidget(QLabel("Vol:"))
-        controls_layout.addWidget(self.volumeSlider)
+        
+        # Inicializa Volume
+        self.audioOutput.setVolume(0.7) # 0.0 a 1.0
 
         # Conexões de Sinais do Player
         self.mediaPlayer.positionChanged.connect(self.position_changed)
@@ -237,6 +266,7 @@ class VideoPlayer(QMainWindow):
         self.mediaPlayer.playbackStateChanged.connect(self.media_state_changed)
         self.mediaPlayer.errorOccurred.connect(self.handle_errors)
         self.mediaPlayer.mediaStatusChanged.connect(self.media_status_changed)
+        self.mediaPlayer.metaDataChanged.connect(self.on_meta_data_changed)
 
         # Tenta restaurar o último plugin usado (opcional)
         if self.memory.get('last_plugin') and os.path.exists(self.memory['last_plugin']):
@@ -249,6 +279,7 @@ class VideoPlayer(QMainWindow):
         last_video = self.memory.get('last_video')
         if last_video and os.path.exists(last_video):
             log_to_file(f"Restaurando último vídeo: {last_video}")
+            self.init_playlist(last_video)
             self.load_video(last_video)
 
     def setup_logging(self):
@@ -275,34 +306,86 @@ class VideoPlayer(QMainWindow):
         painter.setPen(QColor("#333")) # Cinza escuro
         painter.drawText(image.rect(), Qt.AlignmentFlag.AlignCenter, "🎵")
 
-        # 2. Texto "Reproduzindo Áudio"
-        font_text = painter.font()
-        font_text.setPointSize(24)
-        painter.setFont(font_text)
-        painter.setPen(QColor("#ccc")) # Cinza claro
-        # Desenha o texto abaixo do centro
-        text_rect = image.rect().adjusted(0, 250, 0, 0)
-        painter.drawText(text_rect, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop, "Reproduzindo Áudio")
+        # 2. Nome da estação
+        if self.station_name:
+            font_station = painter.font()
+            font_station.setPointSize(24)
+            painter.setFont(font_station)
+            painter.setPen(QColor("#ccc")) # Cinza claro
+            station_rect = image.rect().adjusted(0, 250, 0, 0)
+            painter.drawText(station_rect, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop, self.station_name)
+        else:
+            font_text = painter.font()
+            font_text.setPointSize(24)
+            painter.setFont(font_text)
+            painter.setPen(QColor("#ccc")) # Cinza claro
+            text_rect = image.rect().adjusted(0, 250, 0, 0)
+            painter.drawText(text_rect, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop, "Reproduzindo Áudio")
 
-        # 3. Metadata (se disponível, vindo de self.current_media_info)
+        # 3. Metadata da música (se disponível)
         title = self.current_media_info.get('title', '')
         artist = self.current_media_info.get('artist', '')
-        display_text = f"{remove_kodi_formatting(artist)} - {remove_kodi_formatting(title)}" if artist and title else remove_kodi_formatting(title)
+        
+        # Não mostra o nome da estação como título da música se for a mesma coisa
+        if title == self.station_name and not artist:
+            display_text = ""
+        else:
+            display_text = f"{remove_kodi_formatting(artist)} - {remove_kodi_formatting(title)}" if artist and title else remove_kodi_formatting(title)
         
         if display_text:
             font_meta = painter.font()
             font_meta.setPointSize(16)
             painter.setFont(font_meta)
             painter.setPen(QColor("white"))
-            meta_rect = image.rect().adjusted(50, 310, -50, 0) # Adiciona margens
+            # Ajusta a posição para ficar abaixo do nome da estação
+            meta_rect = image.rect().adjusted(50, 310, -50, 0)
             painter.drawText(meta_rect, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop | Qt.TextFlag.TextWordWrap, display_text)
 
         painter.end()
         self.update_cover_signal.emit(image)
 
     def show_notification(self, heading, message):
-        """Exibe um diálogo de informação (modal)."""
-        QMessageBox.information(self, heading, message)
+        """Mostra uma notificação na tela principal."""
+        clean_heading = remove_kodi_formatting(heading)
+        clean_message = remove_kodi_formatting(message)
+        self.statusBar().showMessage(f"{clean_heading}: {clean_message}", 5000)
+
+    def on_meta_data_changed(self):
+        """Lida com a mudança de metadados do stream (ex: título da música em rádio)."""
+        # Em PyQt6, acessamos os metadados diretamente. Se não houver, retorna vazio.
+        metadata = self.mediaPlayer.metaData()
+        
+        if not metadata:
+            return
+
+        # Em PyQt6, usamos o método .value() com a chave do enum.
+        # O backend (FFmpeg) mapeia o metadata 'StreamTitle' para 'Title'.
+        stream_title = metadata.value(QMediaMetaData.Key.Title)
+        
+        # Verifica se o título mudou
+        # Usamos uma chave interna para não reprocessar a mesma string
+        if stream_title and stream_title != self.current_media_info.get('_raw_stream_title'):
+            self.current_media_info['_raw_stream_title'] = stream_title
+            artist = ""
+            title = ""
+            if ' - ' in stream_title:
+                parts = stream_title.split(' - ', 1)
+                artist = parts[0].strip()
+                title = parts[1].strip()
+            else:
+                title = stream_title.strip()
+
+            # Atualiza a informação da música
+            self.current_media_info['artist'] = artist
+            self.current_media_info['title'] = title
+            
+            # Atualiza o título da janela para mostrar estação e música
+            song_display = f"{artist} - {title}" if artist and title else title
+            self.setWindowTitle(f"{self.station_name} | {song_display}" if self.station_name else f"Reproduzindo: {song_display}")
+
+            # Se for áudio, redesenha a UI com a nova informação
+            if self.current_media_info.get('type') == 'music':
+                self.show_default_audio_ui()
 
     def update_metadata_ui(self, info):
         """Atualiza a interface com metadados recebidos do plugin (Artista - Música)."""
@@ -335,6 +418,79 @@ class VideoPlayer(QMainWindow):
                     self.update_cover_signal.emit(image)
         except Exception as e:
             print(f"Erro ao baixar capa: {e}")
+
+    @pyqtSlot(QPixmap)
+    def set_background_pixmap(self, pixmap):
+        """Define o QPixmap no QLabel de fundo, escalando e escurecendo."""
+        if not pixmap.isNull():
+            # Escala para preencher a janela, cortando o excesso
+            scaled_pixmap = pixmap.scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
+            
+            # Cria uma imagem para poder desenhar sobre ela
+            image = QImage(scaled_pixmap.size(), QImage.Format.Format_ARGB32_Premultiplied)
+            painter = QPainter(image)
+            painter.drawPixmap(0, 0, scaled_pixmap)
+            
+            # Pinta um overlay preto semi-transparente para escurecer
+            painter.fillRect(image.rect(), QColor(0, 0, 0, 180)) # 180/255 de opacidade
+            painter.end()
+            
+            self.backgroundLabel.setPixmap(QPixmap.fromImage(image))
+        else:
+            self.backgroundLabel.clear()
+            self.backgroundLabel.setStyleSheet("background-color: #1a1a1a;")
+
+    def update_background(self, url):
+        """Baixa uma imagem em uma thread e emite um sinal para atualizar o fundo."""
+        if not url or not requests:
+            self.update_background_signal.emit(QPixmap()) # Emite pixmap vazio para limpar
+            return
+        
+        try:
+            if url.startswith('http'):
+                response = requests.get(url, timeout=10)
+                if response.status_code == 200:
+                    pixmap = QPixmap()
+                    pixmap.loadFromData(response.content)
+                    self.update_background_signal.emit(pixmap)
+            elif os.path.exists(url):
+                self.update_background_signal.emit(QPixmap(url))
+        except Exception as e:
+            log_to_file(f"Erro ao baixar fanart de fundo: {e}")
+
+    def set_fanart_background(self, fanart_url):
+        """Inicia uma thread para atualizar o fundo com a URL do fanart."""
+        # Usa o fanart do addon como fallback se nenhum for fornecido
+        if not fanart_url and self.current_plugin_path:
+            plugin_dir = os.path.dirname(self.current_plugin_path)
+            fallback_fanart = os.path.join(plugin_dir, 'fanart.jpg')
+            if os.path.exists(fallback_fanart):
+                fanart_url = fallback_fanart
+            
+        threading.Thread(target=self.update_background, args=(fanart_url,), daemon=True).start()
+
+    def set_details_image(self, image):
+        """Define a imagem na sidebar de detalhes, escalando-a corretamente."""
+        if not image.isNull():
+            pixmap = QPixmap.fromImage(image)
+            # Escala a imagem para caber na largura da sidebar, mantendo a proporção
+            scaled_pixmap = pixmap.scaledToWidth(self.details_width - 20, Qt.TransformationMode.SmoothTransformation)
+            self.detailsImageLabel.setPixmap(scaled_pixmap)
+            self.detailsImageLabel.show()
+        else:
+            self.detailsImageLabel.hide()
+            self.detailsImageLabel.clear()
+
+    def download_details_image(self, url):
+        """Baixa a imagem da URL em uma thread e emite sinal para exibir."""
+        if not requests: return
+        try:
+            response = requests.get(url, timeout=5)
+            if response.status_code == 200:
+                image = QImage.fromData(response.content)
+                self.update_details_image_signal.emit(image)
+        except Exception as e:
+            log_to_file(f"Erro ao baixar imagem de detalhes: {e}")
 
     def save_playlist_state(self):
         """Salva a playlist atual para restaurar depois."""
@@ -371,6 +527,7 @@ class VideoPlayer(QMainWindow):
         if file_dialog.exec():
             files = file_dialog.selectedFiles()
             if files:
+                self.init_playlist(files[0])
                 self.load_video(files[0])
 
     def check_plugin_deps(self):
@@ -517,11 +674,15 @@ class VideoPlayer(QMainWindow):
         
         self.run_plugin_action("") # Roda a raiz do plugin
 
-    def run_plugin_action(self, url, is_back=False):
+    def run_plugin_action(self, url, is_back=False, dialog_answers=None):
         if not self.current_plugin_path:
             return
 
-        # Salva o estado atual da playlist para restaurar se for apenas um vídeo (não navegação)
+        # Limpa a lista interna de arquivos locais para evitar conflitos de índices
+        # Isso impede que o player tente carregar um arquivo local ao clicar no "Voltar" do plugin
+        self.playlist = []
+
+        # Salva o estado atual da playlist para restaurar se for apenas um vídeo
         # Evita salvar o item de "Carregando..." se for um redirecionamento interno
         first_item = self.playlistWidget.item(0)
         is_loading = first_item and first_item.text() == "Carregando, aguarde..."
@@ -548,7 +709,7 @@ class VideoPlayer(QMainWindow):
         
         # --- Configuração da Thread ---
         self.thread = QThread()
-        self.worker = PluginWorker(self.current_plugin_path, url)
+        self.worker = PluginWorker(self.current_plugin_path, url, dialog_answers)
         self.worker.moveToThread(self.thread)
 
         # Conecta sinais e slots
@@ -558,33 +719,36 @@ class VideoPlayer(QMainWindow):
         self.worker.finished.connect(self.thread.quit)
         self.worker.finished.connect(self.worker.deleteLater)
         self.thread.finished.connect(self.thread.deleteLater)
-        self.thread.finished.connect(self.clear_thread_references)
+        self.thread.finished.connect(lambda: setattr(self, 'thread', None))
 
         # --- Gerenciamento de Estado (antes de iniciar a thread) ---
-        if not is_back and url != self.current_plugin_params:
-            self.plugin_history.append(self.current_plugin_params)
-        self.current_plugin_params = url
+        # Adiciona ao histórico apenas se a URL for diferente da atual, para evitar duplicatas
+        if not is_back:
+            # Pega a última URL do histórico, se houver
+            last_url_in_history = self.plugin_history[-1] if self.plugin_history else None
+            if url != last_url_in_history:
+                self.plugin_history.append(self.current_plugin_params)
+        self.current_plugin_params = url # Atualiza o parâmetro atual
 
         # Inicia a thread
         self.thread.start()
 
-    def clear_thread_references(self):
-        """Nulifica as referências à thread e ao worker para evitar acesso a objetos deletados."""
-        self.thread = None
-        self.worker = None
-
     def on_plugin_result(self, data):
         """Lida com o resultado do worker do plugin na thread principal."""
         # Se o plugin retornou uma URL resolvida (vídeo direto)
+        if data.get("error"):
+            self.playlistWidget.clear()
+            error_item = QListWidgetItem(f"Erro no Plugin: {data['error']}")
+            error_item.setForeground(QBrush(QColor("red")))
+            self.playlistWidget.addItem(error_item)
+            return
+
         if data.get("resolved_url"):
             r_url = data["resolved_url"]
             
-            if r_url.startswith("plugin://") and r_url != self.current_plugin_params:
+            # Se o plugin retornou outra URL de plugin, executa-a
+            if r_url.startswith("plugin://"):
                 self.run_plugin_action(r_url)
-                return
-                
-            if r_url.startswith("magnet:"):
-                self.run_plugin_action(f"plugin://plugin.video.elementum/play?uri={urllib.parse.quote(r_url)}")
                 return
 
             if data.get("drm_info"):
@@ -592,19 +756,41 @@ class VideoPlayer(QMainWindow):
                 log_to_file(f"DRM Widevine Detectado: {drm}")
                 QMessageBox.warning(self, "DRM Protegido", f"Este vídeo requer licença Widevine.\nChave: {drm['key'][:50]}...\n\nO player interno (QMediaPlayer) não suporta descriptografia DRM.\nA reprodução falhará ou ficará preta.")
 
-            # Restaura a playlist anterior, pois não houve mudança de diretório (apenas play)
-            self.playlistWidget.clear()
+            # Passa a informação de mídia para o load_video
+            self.load_video(r_url, data.get("media_info"))
+            # Esconde a lista de plugins/arquivos para focar no vídeo/áudio
+            if not self.playlistWidget.isHidden():
+                self.playlistWidget.hide()
+            
+            # Restaura a playlist anterior (backup) se houver, substituindo o "Carregando..."
             if hasattr(self, 'temp_playlist_backup') and self.temp_playlist_backup:
+                self.playlistWidget.clear()
                 for item_data in self.temp_playlist_backup:
                     item = QListWidgetItem(item_data['text'])
                     item.setData(Qt.ItemDataRole.UserRole, item_data['data'])
-                    if item_data['foreground'] != QBrush():
-                        item.setForeground(item_data['foreground'])
+                    item.setForeground(item_data['foreground'])
                     self.playlistWidget.addItem(item)
-
-            # Passa a informação de mídia para o load_video
-            self.load_video(data["resolved_url"], data.get("media_info"))
+            elif self.playlistWidget.count() > 0 and self.playlistWidget.item(0).text() == "Carregando, aguarde...":
+                self.playlistWidget.clear()
+                
             return
+
+        # --- Tratamento de Diálogos ---
+        dialog_type = data.get("dialog_type")
+        if dialog_type:
+            if dialog_type == "select":
+                heading = remove_kodi_formatting(data.get("heading", "Selecione uma opção"))
+                raw_options = data.get("options", [])
+                clean_options = [remove_kodi_formatting(opt) for opt in raw_options]
+                
+                item, ok = QInputDialog.getItem(self, "Seleção", heading, clean_options, 0, False)
+                if ok and item in clean_options:
+                    idx = clean_options.index(item)
+                    # Retoma a execução do plugin passando a resposta
+                    self.run_plugin_action(self.current_plugin_params, dialog_answers=[idx])
+                else:
+                    self.playlistWidget.clear()
+                return
 
         # Se o plugin retornou uma lista de itens (pastas ou vídeos)
         if data.get("items") is not None:
@@ -618,29 +804,37 @@ class VideoPlayer(QMainWindow):
                 self.playlistWidget.addItem(back_item)
             
             items = data["items"]
-            if not items and data.get("error"):
-                 error_item = QListWidgetItem(f"Erro: {data['error']}")
-                 error_item.setForeground(QBrush(QColor("red")))
-                 self.playlistWidget.addItem(error_item)
-
             for item in items:
                 clean_label = remove_kodi_formatting(item['label'])
                 list_item = QListWidgetItem(clean_label)
                 list_item.setData(Qt.ItemDataRole.UserRole, item)
                 self.playlistWidget.addItem(list_item)
-        elif data.get("error"):
-            self.playlistWidget.clear()
-            error_item = QListWidgetItem(f"Erro ao carregar: {data['error']}")
-            error_item.setForeground(QBrush(QColor("red")))
-            self.playlistWidget.addItem(error_item)
+            
+            # Seleciona o primeiro item para mostrar metadados automaticamente (se não for botão de voltar)
+            if self.playlistWidget.count() > 0:
+                start_idx = 1 if self.plugin_history and self.playlistWidget.count() > 1 else 0
+                self.playlistWidget.setCurrentRow(start_idx)
 
     def init_playlist(self, current_file):
         self.playlist.clear()
         self.playlistWidget.clear()
+        
+        # Garante caminho absoluto se for arquivo local (evita erros com paths relativos)
+        if current_file and not os.path.dirname(current_file) and os.path.exists(current_file):
+            current_file = os.path.abspath(current_file)
+            
         directory = os.path.dirname(current_file)
-        extensions = ('.mp4', '.avi', '.mkv', '.mov', '.mp3', '.webm', '.wav', '.flv')
+        extensions = ('.mp4', '.avi', '.mkv', '.mov', '.mp3', '.webm', '.wav', '.flv', '.strm')
         
         try:
+            # Se o diretório não existir (ex: URL não-HTTP ou path vazio), usa modo de item único
+            if not directory or not os.path.exists(directory):
+                self.playlist = [current_file]
+                self.current_index = 0
+                self.playlistWidget.addItem(os.path.basename(current_file))
+                self.playlistWidget.setCurrentRow(0)
+                return
+
             # Lista arquivos da pasta, normaliza caminhos e ordena alfabeticamente
             files = sorted([
                 os.path.normpath(os.path.join(directory, f))
@@ -672,8 +866,32 @@ class VideoPlayer(QMainWindow):
             self.playlistWidget.addItem(os.path.basename(current_file))
             self.playlistWidget.setCurrentRow(0)
 
-    def load_video(self, file_path, media_info=None):
+    def load_video(self, file_path, media_info=None): # media_info é um dict com 'title', 'plot', 'icon', etc.
         self.current_media_info = media_info or {}
+        self.station_name = "" # Reseta o nome da estação
+        
+        # --- Preenche a sidebar de detalhes ---
+        title = remove_kodi_formatting(self.current_media_info.get('title', ''))
+        plot = self.current_media_info.get('plot', '') # Pode conter dados estruturados
+        icon_url = self.current_media_info.get('icon', '')
+        fanart_url = self.current_media_info.get('fanart', '')
+        self._parse_and_display_details(title, plot, icon_url, fanart_url)
+
+        # --- Tratamento de arquivos .strm (Links de Texto) ---
+        if not file_path.startswith("http") and file_path.lower().endswith(".strm") and os.path.exists(file_path):
+            try:
+                if not self.current_media_info.get('title'):
+                    self.current_media_info['title'] = os.path.splitext(os.path.basename(file_path))[0]
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    content = f.read().strip()
+                if content:
+                    log_to_file(f"Resolvendo .strm: {file_path} -> {content}")
+                    if content.startswith("plugin://"):
+                        self.run_plugin_action(content)
+                        return
+                    file_path = content
+            except Exception as e:
+                log_to_file(f"Erro ao ler .strm: {e}")
         
         # Limpa o frame anterior para evitar mostrar a capa do item anterior
         self.videoOutput.set_frame(None)
@@ -686,9 +904,11 @@ class VideoPlayer(QMainWindow):
                 media_type = 'music'
             else:
                 media_type = 'video'
+        self.current_media_info['type'] = media_type
         
         # Se for música, prepara a UI de áudio
         if media_type == 'music':
+            self.station_name = remove_kodi_formatting(self.current_media_info.get('title', ''))
             icon_url = self.current_media_info.get('icon')
             # Se o plugin não deu um título, usa o nome do arquivo
             if not self.current_media_info.get('title'):
@@ -711,6 +931,7 @@ class VideoPlayer(QMainWindow):
                 self.show_default_audio_ui()
 
         """Carrega um vídeo/stream, decidindo se usa o player nativo ou o buffer com requests."""
+        # Reseta o buffer anterior se houver
         if self.stream_buffer:
             self.stream_buffer.close()
             self.stream_buffer = None
@@ -724,25 +945,67 @@ class VideoPlayer(QMainWindow):
                     if "=" in param:
                         key, value = param.split("=", 1)
                         headers[urllib.parse.unquote(key)] = urllib.parse.unquote(value)
-            is_hls = '.m3u8' in url_part
-            is_simple_http = url_part.startswith("http://") and not headers
-            if is_hls or is_simple_http:
+            
+            # --- CORREÇÃO PARA PROXY ONEPLAY/IPTV (FFmpeg Extension Check) ---
+            if ("127.0.0.1" in url_part or "192.168." in url_part) and ("/hlsretry" in url_part or "/?url=" in url_part):
+                try:
+                    parsed = urllib.parse.urlparse(url_part)
+                    qs = urllib.parse.parse_qs(parsed.query)
+                    if 'url' in qs:
+                        real_url = qs['url'][0]
+                        clean_url = real_url.replace('live/', '').replace('.m3u8', '')
+                        port = parsed.port or 8094
+                        # Usa o host original (pode ser 192.168.x.x ou 127.0.0.1)
+                        host = parsed.hostname
+                        new_url = f"http://{host}:{port}/tsdownloader?url={urllib.parse.quote(clean_url)}"
+                        log_to_file(f"Proxy Fix: Forçando tsdownloader para evitar erro de extensão HLS: {new_url}")
+                        url_part = new_url
+                except Exception as e:
+                    log_to_file(f"Erro ao aplicar fix OnePlay: {e}")
+            # ----------------------------------------------------------------
+
+            use_native_player = False
+            if headers:
+                use_native_player = False
+            elif '.m3u8' in url_part.lower():
+                use_native_player = True
+            else:
+                try:
+                    r = requests.head(url_part, timeout=5, allow_redirects=True, headers={'User-Agent': kodi_bridge.MockXBMC.getUserAgent()})
+                    r.raise_for_status() 
+                    content_type = r.headers.get('Content-Type', '').lower()
+                    if 'text/html' in content_type:
+                        use_native_player = False
+                    else:
+                        use_native_player = True
+                except Exception as e:
+                    log_to_file(f"HEAD request failed ({e}), falling back to StreamBuffer.")
+                    use_native_player = False
+            
+            is_local_proxy = "127.0.0.1" in url_part
+            if use_native_player and not is_local_proxy:
                 self.mediaPlayer.setSource(QUrl(url_part))
                 log_to_file(f"Streaming nativo (sem buffer): {url_part}")
             else:
                 self.stream_buffer = StreamBuffer(url_part, headers)
                 if self.stream_buffer.open(QIODevice.OpenModeFlag.ReadOnly):
+                    self.stream_buffer.metadata_changed.connect(self.update_stream_metadata)
                     self.mediaPlayer.setSourceDevice(self.stream_buffer, QUrl(url_part))
-                    log_to_file(f"Streaming via Buffer (requests): {url_part}")
+                    log_to_file(f"Streaming via Buffer (requests): {url_part} | Headers: {headers}")
                 else:
                     self.handle_errors()
                     return
         else:
-            self.init_playlist(file_path)
-            self.mediaPlayer.setSource(QUrl.fromLocalFile(file_path))
-            self.memory['last_video'] = file_path
-            save_memory(self.memory)
-
+            if os.path.exists(file_path):
+                self.init_playlist(file_path)
+                self.mediaPlayer.setSource(QUrl.fromLocalFile(file_path))
+                self.memory['last_video'] = file_path
+                save_memory(self.memory)
+            else:
+                QMessageBox.critical(self, "Erro", f"Arquivo não encontrado:\n{file_path}")
+                self.handle_errors()
+                return
+            
         self.playBtn.setEnabled(True)
         self.stopBtn.setEnabled(True)
         title = self.current_media_info.get('title', os.path.basename(file_path.split('|')[0]))
@@ -757,27 +1020,164 @@ class VideoPlayer(QMainWindow):
             self.load_video(self.playlist[self.current_index])
             self.playlistWidget.setCurrentRow(self.current_index)
 
+    def update_stream_metadata(self, metadata):
+        """Atualiza a UI com metadados vindos do StreamBuffer (Rádios ICY)."""
+        stream_title = metadata.get('StreamTitle')
+        if stream_title:
+            # Verifica se o título realmente mudou para evitar processamento desnecessário
+            if stream_title == self.current_media_info.get('_raw_stream_title'):
+                return
+
+            self.current_media_info['_raw_stream_title'] = stream_title
+            
+            # Separa Artista - Música se possível
+            artist = ""
+            title = stream_title.strip()
+            if ' - ' in stream_title:
+                parts = stream_title.split(' - ', 1)
+                artist = parts[0].strip()
+                title = parts[1].strip()
+
+            self.current_media_info['artist'] = artist
+            self.current_media_info['title'] = title
+            
+            # Atualiza título da janela
+            display = f"{artist} - {title}" if artist else title
+            self.setWindowTitle(f"{self.station_name} | {display}" if self.station_name else f"Reproduzindo: {display}")
+
+            # Se estiver na tela de áudio (sem vídeo), atualiza o display
+            if self.current_media_info.get('type') == 'music':
+                self.show_default_audio_ui()
+
     def play_previous(self):
         if self.playlist and self.current_index > 0:
             self.current_index -= 1
             self.load_video(self.playlist[self.current_index])
             self.playlistWidget.setCurrentRow(self.current_index)
 
+    def _parse_and_display_details(self, title, plot, icon_url, fanart_url):
+        """Helper para parsear o plot e atualizar a sidebar de detalhes."""
+        
+        # Atualiza o fundo de tela
+        self.set_fanart_background(fanart_url)
+
+        # Limpa imagem e texto anteriores
+        self.detailsImageLabel.hide()
+        self.detailsImageLabel.clear()
+        self.detailsTextLabel.clear()
+
+        # Inicia download da imagem em background
+        if icon_url:
+            if icon_url.startswith('http'):
+                threading.Thread(target=self.download_details_image, args=(icon_url,), daemon=True).start()
+            elif os.path.exists(icon_url):
+                self.set_details_image(QImage(icon_url))
+
+        # --- Lógica de Parsing do Plot ---
+        # Garante que [CR] seja tratado como quebra de linha antes de remover formatação
+        plot_str = plot
+        if isinstance(plot_str, bytes):
+            plot_str = plot_str.decode('utf-8', errors='ignore')
+
+        title_str = title
+        if isinstance(title_str, bytes):
+            title_str = title_str.decode('utf-8', errors='ignore')
+
+        temp_plot = (plot_str or "").replace('[CR]', '\n')
+        clean_plot = remove_kodi_formatting(temp_plot)
+        clean_title = remove_kodi_formatting(title_str or "")
+        
+        details = {
+            'Avaliação': '', 'Gênero': '', 'Lançamento': '', 'Ano': ''
+        }
+        synopsis_text = ""
+        
+        # Tenta extrair dados estruturados do plot (comum em plugins BR)
+        lines = clean_plot.split('\n')
+        remaining_plot_lines = []
+        
+        key_map = {
+            'Avaliação': 'Avaliação', 'Rating': 'Avaliação',
+            'Gênero': 'Gênero', 'Genre': 'Gênero',
+            'Lançamento': 'Lançamento', 'Release': 'Lançamento', 'Data': 'Lançamento',
+            'Ano': 'Ano', 'Year': 'Ano',
+        }
+        
+        synopsis_keys = ['Sinopse', 'Plot', 'Description']
+
+        for line in lines:
+            if ':' in line:
+                key, value = line.split(':', 1)
+                key = key.strip()
+                
+                if key in key_map:
+                    details[key_map[key]] = value.strip()
+                elif key in synopsis_keys:
+                    # Se já tivermos uma sinopse, anexa a nova linha
+                    if synopsis_text:
+                        synopsis_text += '\n' + value.strip()
+                    else:
+                        synopsis_text = value.strip()
+                else:
+                    remaining_plot_lines.append(line)
+            elif line.strip():
+                remaining_plot_lines.append(line)
+
+        # Se a sinopse não foi encontrada por uma chave explícita, o que sobrou é a sinopse.
+        if not synopsis_text:
+            synopsis_text = ' '.join(remaining_plot_lines).strip()
+        else:
+            # Se a sinopse foi encontrada, mas sobraram linhas, anexa-as.
+            synopsis_text += ' ' + ' '.join(remaining_plot_lines).strip()
+            synopsis_text = synopsis_text.strip()
+
+        # --- Monta o HTML para exibição ---
+        html_parts = [f"<h3 style='color: #ff4b4b;'>{clean_title}</h3>"]
+        meta_html = [f"<b>{k}:</b> {v}" for k, v in details.items() if v]
+        if meta_html:
+            html_parts.append(f"<p style='color: #ddd; font-size: 13px;'>{' | '.join(meta_html)}</p>")
+        
+        if synopsis_text:
+            plot_text = synopsis_text.replace('\n', '<br>') # Suporta quebras de linha
+            plot_text = plot_text[:800] + "..." if len(plot_text) > 800 else plot_text
+            html_parts.append(f"<p style='color: #eee; font-size: 14px;'>{plot_text}</p>")
+            
+        self.detailsTextLabel.setText("".join(html_parts))
+
+        # Mostra a sidebar se tivermos qualquer informação
+        if any(details.values()) or synopsis_text or icon_url or title:
+            self.detailsWidget.setGeometry(0, 0, self.details_width, self.height())
+            self.detailsWidget.show()
+            self.detailsWidget.raise_()
+            self.details_hide_timer.start(15000)
+
     def stop_video(self):
         self.mediaPlayer.stop()
         self.videoOutput.set_frame(None)
+
+        # Limpa o fundo de tela ao parar
+        self.set_fanart_background(None)
         
         # Fecha o buffer de stream para parar o download de dados imediatamente
         if self.stream_buffer:
             self.stream_buffer.close()
             self.stream_buffer = None
             
+        # Esconde a sidebar de detalhes
+        self.detailsWidget.hide()
+        self.details_hide_timer.stop()
+            
         # Notifica o bridge que o player parou (para plugins que monitoram isPlaying)
         kodi_bridge.MockXBMC.Player().stop()
         self.setWindowTitle("Player PyQt6 (Áudio + Vídeo + Zoom)")
-        if self.thread and self.thread.isRunning():
-            self.thread.quit()
-            # O worker será deletado pelo sinal 'finished' conectado. Chamar aqui é redundante.
+        try:
+            if hasattr(self, 'thread') and self.thread and self.thread.isRunning():
+                self.thread.quit()
+                self.worker.deleteLater()
+        except (RuntimeError, AttributeError) as e:
+            # Loga o erro para depuração e reseta a thread para evitar mais crashes.
+            log_to_file(f"Erro ao parar a thread: {e}")
+            self.thread = None # type: ignore
 
     def on_playlist_clicked(self, item):
         row = self.playlistWidget.row(item)
@@ -796,11 +1196,61 @@ class VideoPlayer(QMainWindow):
             # Se for plugin, executa a ação (navegar ou tocar)
             # A URL do plugin já vem formatada (ex: script.py?action=...)
             url = plugin_data['url']
-            self.run_plugin_action(url)
+
+            # --- Detecta Links Diretos (Não-Plugin) ---
+            # Se a URL não for um comando de plugin (plugin://), assume-se que é um link de mídia direto.
+            if not url.startswith("plugin://"):
+                # Reconstrói metadados a partir do listitem do plugin
+                media_info = {}
+                if 'listitem' in plugin_data:
+                    li = plugin_data['listitem']
+                    info = getattr(li, 'info', {})
+                    art = getattr(li, 'art', {})
+                    media_info = {
+                        "title": info.get('title', plugin_data.get('label')),
+                        "artist": info.get('artist'),
+                        "plot": info.get('plot'),
+                        "icon": art.get('icon') or art.get('thumb'),
+                        "type": getattr(li, 'media_type', 'music') # Assume music for radio plugins
+                    }
+                else:
+                    media_info = {"title": item.text(), "type": "music"}
+                
+                self.load_video(url, media_info)
+            else:
+                # Se for uma navegação normal de plugin, executa a ação
+                self.run_plugin_action(url)
         elif row >= 0 and row < len(self.playlist):
             # Comportamento normal de arquivo local
             self.current_index = row
             self.load_video(self.playlist[row])
+
+    def on_playlist_selection_changed(self, current, previous):
+        """Atualiza a sidebar de detalhes quando o item selecionado na playlist muda."""
+        if not current:
+            self.detailsTextLabel.clear()
+            self.detailsImageLabel.hide()
+            self.detailsWidget.hide()
+            return
+
+        data = current.data(Qt.ItemDataRole.UserRole)
+        if not data:
+            return
+
+        # Extrai metadados do item da lista
+        title = remove_kodi_formatting(current.text())
+        plot, icon_url, fanart_url = "", "", ""
+        if isinstance(data, dict):
+            if 'listitem' in data:
+                li = data['listitem']
+                info = getattr(li, 'info', {})
+                art = getattr(li, 'art', {})
+                plot = info.get('plot') or info.get('description') or ''
+                icon_url = art.get('thumb') or art.get('icon') or art.get('poster')
+                fanart_url = art.get('fanart')
+        
+        # Usa a função helper para parsear e exibir
+        self._parse_and_display_details(title, plot, icon_url, fanart_url)
 
     def play_video(self):
         if self.mediaPlayer.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
@@ -811,8 +1261,13 @@ class VideoPlayer(QMainWindow):
     def media_state_changed(self, state):
         if self.mediaPlayer.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self.playBtn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPause))
+            # Inicia timer para esconder a sidebar de detalhes
+            if not self.detailsWidget.isHidden():
+                self.details_hide_timer.start(7000) # 7 segundos
         else:
             self.playBtn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
+            # Para o timer se o vídeo for pausado/parado
+            self.details_hide_timer.stop()
 
     def media_status_changed(self, status):
         if status == QMediaPlayer.MediaStatus.EndOfMedia:
@@ -840,6 +1295,15 @@ class VideoPlayer(QMainWindow):
         print(f"Erro: {err_msg}")
         log_to_file(f"Erro no Player: {err_msg}")
 
+    def open_settings_dialog(self):
+        """Abre o diálogo de configurações de cache."""
+        from modules.settings_dialog import SettingsDialog
+        dialog = SettingsDialog(self)
+        if dialog.exec():
+            # Recarrega a memória local após salvar
+            self.memory = load_memory()
+            self.show_notification("Configurações", "Configurações de cache aplicadas com sucesso.")
+
     def handle_frame(self, frame):
         if frame.isValid():
             self.videoOutput.set_frame(frame.toImage())
@@ -849,6 +1313,18 @@ class VideoPlayer(QMainWindow):
         w = self.videoOutput.width()
         x = event.pos().x()
         
+        # --- Lógica para sidebar de detalhes (esquerda) ---
+        if x < 50:
+            if self.detailsWidget.isHidden() and self.detailsTextLabel.text():
+                self.details_hide_timer.stop() # Para o timer de esconder
+                self.detailsWidget.setGeometry(0, 0, self.details_width, self.height())
+                self.detailsWidget.show()
+                self.detailsWidget.raise_()
+        elif x > self.details_width:
+            if not self.detailsWidget.isHidden():
+                self.detailsWidget.hide()
+        # ------------------------------------------------
+
         if x > w - 50:
             if self.playlistWidget.isHidden():
                 self.playlistWidget.setGeometry(self.width() - self.playlist_width, 0, self.playlist_width, self.height())
@@ -865,8 +1341,13 @@ class VideoPlayer(QMainWindow):
             self.showFullScreen()
 
     def resizeEvent(self, event):
+        self.backgroundLabel.setGeometry(self.rect()) # Mantém o fundo do tamanho da janela
         if not self.playlistWidget.isHidden():
             self.playlistWidget.setGeometry(self.width() - self.playlist_width, 0, self.playlist_width, self.height())
+        
+        # Atualiza geometria da sidebar de detalhes
+        if not self.detailsWidget.isHidden():
+            self.detailsWidget.setGeometry(0, 0, self.details_width, self.height())
         super().resizeEvent(event)
 
     def keyPressEvent(self, event):

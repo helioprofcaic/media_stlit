@@ -12,6 +12,8 @@ from modules.utils import install_dependencies
 
 def navigate_to(url, label="Home", dialog_answers=None):
     """Executa o plugin e atualiza o estado com os novos itens."""
+    from core.utils import remove_kodi_formatting
+    label = remove_kodi_formatting(label)
     print(f"[NAV] Navigating to: {url} (Label: {label})")
     
     # --- Atualiza Histórico Recente (Home) ---

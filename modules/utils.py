@@ -52,6 +52,10 @@ def install_dependencies(plugin_path):
             'script.module.urlresolver': None,
             'script.module.metahandler': None,
             'script.module.inputstreamhelper': None,
+            'plugin.video.youtube': None,
+            'plugin.video.pluginstreaming': None,
+            'script.module.slproxy': None,
+            'script.module.websocket': None,
         }
 
         for import_tag in requires.findall('import'):
@@ -81,7 +85,10 @@ def install_dependencies(plugin_path):
                 if import_name in sys.modules:
                     continue
                 
-                spec = importlib.util.find_spec(import_name)
+                try:
+                    spec = importlib.util.find_spec(import_name)
+                except:
+                    spec = None
                 
                 if spec is None:
                     packages_to_install.append(pip_package)
@@ -104,4 +111,4 @@ def install_dependencies(plugin_path):
                         st.warning(f"Não foi possível instalar algumas dependências automaticamente: {packages_to_install}")
             
     except Exception as e:
-        print(f"Erro ao verificar dependências: {e}")
+        print(f"[DEBUG] Erro ao verificar dependências: {e}")
