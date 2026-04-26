@@ -3,6 +3,8 @@ import os
 import sys
 import xml.etree.ElementTree as ET
 import urllib.parse
+import base64
+import json
 import google_storage
 import socket
 
