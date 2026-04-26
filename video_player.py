@@ -11,6 +11,7 @@ import threading
 from core.utils import log_to_file, load_memory, save_memory, install_pyqt, PLAYLIST_FILE, ADDONS_DIR, PLUGINS_REPO_DIR, remove_kodi_formatting
 from core import kodi_bridge
 from core.repository import RepositoryBrowser
+from core.proxy import ProxyServer
 from stream_buffer import StreamBuffer
 from video_widget import VideoOutputWidget
 
@@ -156,14 +157,19 @@ class VideoPlayer(QMainWindow):
     # Sinal para atualizar o fundo de tela
     update_background_signal = pyqtSignal(QPixmap)
 
-    def __init__(self):
+    def __init__(self, python_executable=None):
         super().__init__()
         self.setWindowTitle("Player PyQt6 (Áudio + Vídeo + Zoom)")
         self.resize(800, 600)
+        self.python_executable = python_executable or sys.executable
 
         global _input_helper
         if _input_helper is None:
             _input_helper = InputHelper()
+
+        # Inicia o proxy local para HLS
+        self.proxy_server = ProxyServer()
+        self.proxy_server.start()
 
         # Configura o ícone da janela principal
         icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'icon.png')
@@ -523,27 +529,23 @@ class VideoPlayer(QMainWindow):
                 self.load_video(files[0])
 
     def check_plugin_deps(self):
-        """Verifica se requests e bs4 estão instalados e oferece instalação."""
+        """Verifica se requests, bs4 e cloudscraper estão instalados e oferece instalação."""
+        dependencies = {
+            "requests": "requests",
+            "bs4": "beautifulsoup4",
+            "cloudscraper": "cloudscraper",
+            "chardet": "chardet"
+        }
         missing = []
-        try:
-            import requests
-        except ImportError:
-            missing.append("requests")
         
-        try:
-            import bs4
-        except ImportError:
-            missing.append("beautifulsoup4")
+        # Verifica cada dependência
+        for import_name, pip_name in dependencies.items():
+            if importlib.util.find_spec(import_name) is None:
+                try:
+                    __import__(import_name)
+                except ImportError:
+                    missing.append(pip_name)
 
-        try:
-            import cloudscraper
-        except ImportError:
-            missing.append("cloudscraper")
-
-        try:
-            import chardet
-        except ImportError:
-            missing.append("chardet")
 
         if missing:
             reply = QMessageBox.question(
@@ -555,13 +557,14 @@ class VideoPlayer(QMainWindow):
             
             if reply == QMessageBox.StandardButton.Yes:
                 try:
-                    subprocess.check_call([sys.executable, "-m", "pip", "install"] + missing)
-                    importlib.invalidate_caches()
-                    QMessageBox.information(self, "Sucesso", "Bibliotecas instaladas! Agora você pode carregar o plugin.")
-                    return True
+                    subprocess.check_call([self.python_executable, "-m", "pip", "install"] + missing)
+                    # A instalação foi bem-sucedida. Informa o usuário e fecha o app para que as mudanças tenham efeito.
+                    QMessageBox.information(self, "Instalação Concluída", "As dependências foram instaladas com sucesso.\n\nPor favor, reinicie o aplicativo para continuar.")
+                    sys.exit(0) # Encerra o programa
                 except Exception as e:
                     QMessageBox.critical(self, "Erro", f"Falha na instalação: {e}")
                     return False
+            # Se o usuário clicar em "Não", a função retorna False e a ação é cancelada.
             return False
         return True
 
@@ -781,12 +784,12 @@ class VideoPlayer(QMainWindow):
                 clean_options = [remove_kodi_formatting(opt) for opt in raw_options]
                 
                 item, ok = QInputDialog.getItem(self, "Seleção", heading, clean_options, 0, False)
-                if ok and item in clean_options:
+                if ok and item:
                     idx = clean_options.index(item)
                     # Retoma a execução do plugin passando a resposta
                     self.run_plugin_action(self.current_plugin_params, dialog_answers=[idx])
                 else:
-                    self.playlistWidget.clear()
+                    self.run_plugin_action(self.plugin_history.pop(), is_back=True) # Volta para a tela anterior se o usuário cancelar
                 return
 
         # Se o plugin retornou uma lista de itens (pastas ou vídeos)
@@ -936,58 +939,30 @@ class VideoPlayer(QMainWindow):
         if file_path.startswith("http"):
             url_part = file_path
             headers = {}
+
             if "|" in file_path:
                 url_part, headers_part = file_path.split("|", 1)
                 for param in headers_part.split("&"):
                     if "=" in param:
                         key, value = param.split("=", 1)
                         headers[urllib.parse.unquote(key)] = urllib.parse.unquote(value)
-            
-            # --- CORREÇÃO PARA PROXY ONEPLAY/IPTV (FFmpeg Extension Check) ---
-            if ("127.0.0.1" in url_part or "192.168." in url_part) and ("/hlsretry" in url_part or "/?url=" in url_part):
-                try:
-                    parsed = urllib.parse.urlparse(url_part)
-                    qs = urllib.parse.parse_qs(parsed.query)
-                    if 'url' in qs:
-                        real_url = qs['url'][0]
-                        clean_url = real_url.replace('live/', '').replace('.m3u8', '')
-                        port = parsed.port or 8094
-                        # Usa o host original (pode ser 192.168.x.x ou 127.0.0.1)
-                        host = parsed.hostname
-                        new_url = f"http://{host}:{port}/tsdownloader?url={urllib.parse.quote(clean_url)}"
-                        log_to_file(f"Proxy Fix: Forçando tsdownloader para evitar erro de extensão HLS: {new_url}")
-                        url_part = new_url
-                except Exception as e:
-                    log_to_file(f"Erro ao aplicar fix OnePlay: {e}")
-            # ----------------------------------------------------------------
 
-            use_native_player = False
-            if headers:
-                use_native_player = False
-            elif '.m3u8' in url_part.lower():
-                use_native_player = True
-            else:
-                try:
-                    r = requests.head(url_part, timeout=5, allow_redirects=True, headers={'User-Agent': kodi_bridge.MockXBMC.getUserAgent()})
-                    r.raise_for_status() 
-                    content_type = r.headers.get('Content-Type', '').lower()
-                    if 'text/html' in content_type:
-                        use_native_player = False
-                    else:
-                        use_native_player = True
-                except Exception as e:
-                    log_to_file(f"HEAD request failed ({e}), falling back to StreamBuffer.")
-                    use_native_player = False
+            # --- Lógica de Seleção de Player (Proxy vs Buffer) ---
+            is_hls = any(p in url_part.lower() for p in ['.m3u8', '/m3u8/', 'master.txt', 'index.txt', 'playlist.m3u8', '.ts', '.m4s', '.mpd', '/hls/'])
             
-            is_local_proxy = "127.0.0.1" in url_part
-            if use_native_player and not is_local_proxy:
-                self.mediaPlayer.setSource(QUrl(url_part))
-                log_to_file(f"Streaming nativo (sem buffer): {url_part}")
+            # Usa o proxy para streams HLS que precisam de headers ou que são de servidores locais (ex: Elementum)
+            should_proxy_hls = is_hls and (bool(headers) or '127.0.0.1' in url_part or '192.168.' in url_part or 'localhost' in url_part)
+
+            if should_proxy_hls:
+                final_url = self.proxy_server.get_proxy_url(url_part, headers)
+                self.mediaPlayer.setSource(QUrl(final_url))
+                log_to_file(f"Streaming HLS via Proxy Interno: {final_url}")
             else:
+                # Para todos os outros casos (links diretos, MP4 com headers, etc.), usa o StreamBuffer
                 self.stream_buffer = StreamBuffer(url_part, headers)
                 if self.stream_buffer.open(QIODevice.OpenModeFlag.ReadOnly):
                     self.stream_buffer.metadata_changed.connect(self.update_stream_metadata)
-                    self.mediaPlayer.setSourceDevice(self.stream_buffer, QUrl(url_part))
+                    self.mediaPlayer.setSourceDevice(self.stream_buffer, QUrl())
                     log_to_file(f"Streaming via Buffer (requests): {url_part} | Headers: {headers}")
                 else:
                     self.handle_errors()
@@ -1193,12 +1168,13 @@ class VideoPlayer(QMainWindow):
             # Se for plugin, executa a ação (navegar ou tocar)
             # A URL do plugin já vem formatada (ex: script.py?action=...)
             url = plugin_data['url']
-
-            # --- Detecta Links Diretos (Não-Plugin) ---
-            # Se a URL não for um comando de plugin (plugin://), assume-se que é um link de mídia direto.
-            if not url.startswith("plugin://"):
+            
+            # Se o item for "não-pasta" (isFolder=False), pode ser um link direto ou um item que precisa ser resolvido.
+            # A lógica de resolução (run_plugin_action) já lida com isso.
+            # A verificação abaixo é para links diretos que já vêm com metadados.
+            if not plugin_data.get('isFolder') and not url.startswith("plugin://"):
                 # Reconstrói metadados a partir do listitem do plugin
-                media_info = {}
+                media_info = {"title": item.text(), "type": "video"} # Fallback
                 if 'listitem' in plugin_data:
                     li = plugin_data['listitem']
                     info = getattr(li, 'info', {})
@@ -1208,12 +1184,10 @@ class VideoPlayer(QMainWindow):
                         "artist": info.get('artist'),
                         "plot": info.get('plot'),
                         "icon": art.get('icon') or art.get('thumb'),
-                        "type": getattr(li, 'media_type', 'music') # Assume music for radio plugins
+                        "type": getattr(li, 'media_type', 'video')
                     }
-                else:
-                    media_info = {"title": item.text(), "type": "music"}
-                
                 self.load_video(url, media_info)
+            
             else:
                 # Se for uma navegação normal de plugin, executa a ação
                 self.run_plugin_action(url)

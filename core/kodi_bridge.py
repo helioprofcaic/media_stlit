@@ -1118,58 +1118,53 @@ def _patch_urllib():
     in all requests. This is crucial for many Kodi addons that are blocked by
     servers when using Python's default User-Agent.
     """
-    # Evita aplicar o patch múltiplas vezes se a função for chamada novamente
     if getattr(urllib.request, '_patched_by_mediastlit', False):
         return
 
     try:
         import cloudscraper
-        scraper = cloudscraper.create_scraper()
-        print("[BRIDGE] CloudScraper ativado para todas as requisições de rede.")
+        import requests
+        from requests.adapters import HTTPAdapter
+        
+        # Cria uma única instância do scraper para ser usada por todos os patches
+        scraper = cloudscraper.create_scraper(
+            browser={
+                'browser': 'chrome',
+                'platform': 'windows',
+                'desktop': True
+            }
+        )
+        print("[BRIDGE] CloudScraper ativado. Todas as requisições serão roteadas por ele.")
 
-        # --- Patch para urllib.request ---
+        # --- 1. Patch para urllib.request (usado por plugins mais antigos) ---
         original_urlopen = urllib.request.urlopen
         def patched_urlopen(url, *args, **kwargs):
             if isinstance(url, urllib.request.Request):
                 req_url = url.get_full_url()
-                req_headers = url.headers
+                headers = url.headers
             else:
                 req_url = url
-                req_headers = {}
-
-            # Força um User-Agent moderno, sobrescrevendo o do plugin se necessário
-            req_headers['User-Agent'] = MockXBMC.getUserAgent()
+                headers = {}
 
             try:
-                response = scraper.get(req_url, headers=req_headers, timeout=kwargs.get('timeout', 15))
+                # Usa o scraper.get, que já tem o User-Agent e lógica de bypass
+                response = scraper.get(req_url, headers=headers, timeout=kwargs.get('timeout', 20))
                 response.raise_for_status()
-                log_to_file(f"[BRIDGE] urllib (via CloudScraper) Success: {req_url}")
+                log_to_file(f"[BRIDGE] urllib patched call successful: {req_url}")
                 return io.BytesIO(response.content)
             except Exception as e:
-                log_to_file(f"[BRIDGE] urllib (via CloudScraper) falhou para {req_url}: {e}")
+                log_to_file(f"[BRIDGE] urllib patched call failed for {req_url}: {e}")
                 raise urllib.error.HTTPError(req_url, 403, f"Forbidden (CloudScraper failed: {e})", {}, None)
 
         urllib.request.urlopen = patched_urlopen
         urllib.request._patched_by_mediastlit = True
 
-        # --- Patch para a biblioteca requests ---
-        # Alguns plugins (como o proxy do Viking) usam 'requests' diretamente.
-        import requests
-        original_requests_get = requests.get
-        original_requests_post = requests.post
-
-        def patched_get(url, **kwargs):
-            # Garante que o scraper do cloudscraper seja usado
-            return scraper.get(url, timeout=kwargs.get('timeout', 20), **kwargs)
-
-        def patched_post(url, **kwargs):
-            # Garante que o scraper do cloudscraper seja usado
-            return scraper.post(url, timeout=kwargs.get('timeout', 20), **kwargs)
-
-        requests.get = patched_get
-        requests.post = patched_post
-        requests.Session.get = patched_get
-        requests.Session.post = patched_post
+        # --- 2. Patch para a biblioteca requests (usada pelo proxy.py do Viking) ---
+        # Substitui os métodos da sessão do requests pelos do cloudscraper
+        requests.Session.get = scraper.get
+        requests.Session.post = scraper.post
+        requests.get = scraper.get
+        requests.post = scraper.post
 
     except ImportError:
         print("[BRIDGE] CloudScraper não encontrado. Usando urllib padrão com headers.")
@@ -1215,40 +1210,51 @@ def _patch_dns_resolver():
 
     original_getaddrinfo = socket.getaddrinfo
     dns_cache = {}
-
     def doh_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+        # Evita recursão: se estivermos tentando resolver o próprio servidor de DoH
+        if any(d in host for d in ["cloudflare-dns.com", "dns.google", "dns.quad9.net"]):
+             return original_getaddrinfo(host, port, family, type, proto, flags)
+
         # Se já for um IP, não precisa resolver
         try:
             socket.inet_aton(host)
             return original_getaddrinfo(host, port, family, type, proto, flags)
         except (socket.error, OSError):
-            pass # Não é um IP, continuar para resolução
+            pass
 
-        # Verifica o cache
         if host in dns_cache:
             return dns_cache[host]
 
-        try:
-            # Usa o requests (que já está patcheado com cloudscraper) para a consulta DoH
-            import requests
-            doh_url = "https://cloudflare-dns.com/dns-query"
-            params = {'name': host, 'type': 'A'}
-            headers = {'accept': 'application/dns-json'}
-            
-            response = requests.get(doh_url, params=params, headers=headers, timeout=5)
-            response.raise_for_status()
-            dns_json = response.json()
+        import requests
+        # Usamos uma sessão local para garantir que os headers sejam corretos e evitar loops
+        s = requests.Session()
+        s._ua_patched = True # Marca para evitar re-patching de UA se houver
+        
+        providers = [
+            {"name": "Cloudflare", "url": "https://cloudflare-dns.com/dns-query"},
+            {"name": "Google", "url": "https://dns.google/resolve"},
+            {"name": "Quad9", "url": "https://dns.quad9.net:5053/dns-query"}
+        ]
 
-            if dns_json.get('Answer'):
-                ip_address = dns_json['Answer'][0]['data']
-                # Chama o original com o IP resolvido para obter a estrutura correta
-                result = original_getaddrinfo(ip_address, port, family, type, proto, flags)
-                dns_cache[host] = result # Armazena no cache
-                log_to_file(f"[DNS] Resolvido via DoH: {host} -> {ip_address}")
-                return result
-        except Exception as e:
-            log_to_file(f"[DNS] Falha na resolução DoH para {host}: {e}. Usando resolver padrão.")
+        for p in providers:
+            try:
+                # Todas essas APIs suportam o parâmetro name/type via JSON query
+                resp = s.get(p["url"], params={'name': host, 'type': 'A'}, 
+                             headers={'accept': 'application/dns-json'}, timeout=4)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if data.get('Answer'):
+                        for ans in data['Answer']:
+                            if ans.get('type') == 1: # A record
+                                ip = ans['data']
+                                result = original_getaddrinfo(ip, port, family, type, proto, flags)
+                                dns_cache[host] = result
+                                log_to_file(f"[DNS] Resolvido via {p['name']}: {host} -> {ip}")
+                                return result
+            except Exception as e:
+                log_to_file(f"[DNS] Falha no provedor {p['name']} para {host}: {e}")
 
+        # Fallback Final para o resolver do sistema
         return original_getaddrinfo(host, port, family, type, proto, flags)
 
     socket.getaddrinfo = doh_getaddrinfo
@@ -1337,8 +1343,6 @@ def setup_mocks():
     if 'urlresolver' not in sys.modules:
         sys.modules['urlresolver'] = MockResolveURL
         
-    if 'cloudscraper' not in sys.modules:
-        sys.modules['cloudscraper'] = None # Permite que a verificação de importação funcione
 
     if 'metahandler' not in sys.modules:
         sys.modules['metahandler'] = MockMetaHandler

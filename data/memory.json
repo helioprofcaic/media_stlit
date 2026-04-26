@@ -23,12 +23,12 @@
         "B:\\Local\\Dev\\media_stlit\\plugin\\plugin.video.comandoplay\\main.py",
         "B:\\Local\\Dev\\media_stlit\\data\\addons\\plugin.video.comandoplay\\main.py"
     ],
-    "last_plugin": "B:\\Local\\Dev\\media_stlit\\data\\addons\\plugin.video.viking.tv.online\\default.py",
-    "last_directory": "B:/Local/Dev/media_stlit/plugin",
-    "last_video": "resume:select:0",
+    "last_plugin": "B:\\Local\\Dev\\media_stlit\\data\\addons\\plugin.video.comandoplay\\main.py",
+    "last_directory": "B:\\Downloads\\Curso Robotica",
+    "last_video": "B:\\Downloads\\Curso Robotica\\01 - Curso gr\u00e1tis de rob\u00f3tica Aula 1 (Instala\u00e7\u00e3o, tutorial vrep).mp4",
     "cache_config": {
-        "buffer_size_mb": 128,
-        "read_factor": 12,
-        "chunk_size_kb": 512
+        "buffer_size_mb": 110,
+        "read_factor": 15,
+        "chunk_size_kb": 96
     }
 }

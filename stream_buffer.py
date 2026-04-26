@@ -6,6 +6,7 @@ from PyQt6.QtCore import QIODevice, pyqtSignal
 from core.utils import log_to_file, load_memory
 import threading
 import time
+import m3u8
 from collections import deque
 
 class StreamBuffer(QIODevice):
@@ -26,6 +27,12 @@ class StreamBuffer(QIODevice):
     metadata_changed = pyqtSignal(dict)
 
     def __init__(self, url, headers, parent=None):
+        # Adiciona a biblioteca m3u8 como dependência
+        try:
+            import m3u8
+        except ImportError:
+            raise ImportError("A biblioteca 'm3u8' é necessária para HLS. Instale com: pip install m3u8")
+
         super().__init__(parent)
         self.url = url
         self.headers = headers
@@ -181,6 +188,11 @@ class StreamBuffer(QIODevice):
 
     def _append_to_buffer(self, data, generation):
         """Helper para adicionar dados ao buffer de forma thread-safe."""
+        # Adiciona a biblioteca m3u8 como dependência
+        try:
+            import m3u8
+        except ImportError:
+            raise ImportError("A biblioteca 'm3u8' é necessária para HLS. Instale com: pip install m3u8")
         if not data: return
         with self._cond:
             if self._generation != generation: return
@@ -245,11 +257,24 @@ class StreamBuffer(QIODevice):
 
                 # Verifica se o servidor aceitou o Range request
                 bytes_to_skip = 0
+                is_manifest = False
+                
+                # Sniffing inicial para detectar manifestos m3u8 (HLS)
+                # Manifestos são arquivos de texto e não suportam busca por bytes (Range)
+                content_type = response.headers.get('Content-Type', '').lower()
+                if 'mpegurl' in content_type or 'apple.mpegurl' in content_type or self.url.lower().endswith(('.m3u8', '.m3u')):
+                    is_manifest = True
+                    log_to_file("StreamBuffer: Detectado como manifesto HLS (via header ou extensão).")
+                
                 if current_offset > 0 and response.status_code == 200:
-                    log_to_file(f"StreamBuffer: Servidor ignorou Range em {current_offset}. Pulando bytes...")
-                    print(f"StreamBuffer: Pulando {current_offset} bytes...")
-                    bytes_to_skip = current_offset
-                    # Se vamos pular muito, o pre-buffering já está ativo
+                    if is_manifest:
+                        log_to_file(f"StreamBuffer: Servidor ignorou Range em manifesto. IGNORANDO skip de bytes para evitar corrupção.")
+                        # Reinicia o offset local para bater com o que o servidor está mandando (início)
+                        current_offset = 0
+                    else:
+                        log_to_file(f"StreamBuffer: Servidor ignorou Range em {current_offset}. Pulando bytes...")
+                        print(f"StreamBuffer: Pulando {current_offset} bytes...")
+                        bytes_to_skip = current_offset
                 elif response.status_code >= 400:
                     if response.status_code in [404, 403, 401]:
                         raise Exception(f"Erro HTTP {response.status_code}")
@@ -261,6 +286,30 @@ class StreamBuffer(QIODevice):
                     if self._stop_flag or self._generation != generation:
                         break
                     
+                    # --- Detecção e Extração de M3U8 de Páginas HTML ---
+                    # Se o conteúdo parece ser HTML, tenta extrair um link .m3u8 de dentro dele.
+                    # Isso é comum em players "embed" que carregam o vídeo via JavaScript.
+                    content_type = response.headers.get('Content-Type', '').lower()
+                    if 'html' in content_type and not is_manifest:
+                        try:
+                            from bs4 import BeautifulSoup
+                            import re
+                            
+                            html_content = response.text # Lê o conteúdo como texto
+                            soup = BeautifulSoup(html_content, 'html.parser')
+                            # Procura por links que terminam em .m3u8 dentro de tags <script>
+                            scripts = soup.find_all('script')
+                            for script in scripts:
+                                if script.string:
+                                    match = re.search(r'https?://[^\s"\']+\.m3u8[^\s"\']+', script.string)
+                                    if match:
+                                        self.url = match.group(0) # Atualiza a URL para o link M3U8 encontrado
+                                        raise Exception(f"HTML detectado, reiniciando com URL M3U8 extraída: {self.url}")
+                        except Exception as e:
+                            # Se a extração falhar ou a URL for encontrada, reinicia o loop para reconectar à nova URL.
+                            log_to_file(f"StreamBuffer: {e}")
+                            raise e # Lança a exceção para acionar a lógica de 'retry'
+
                     if chunk:
                         if bytes_to_skip > 0:
                             if len(chunk) <= bytes_to_skip:
@@ -289,9 +338,15 @@ class StreamBuffer(QIODevice):
                     if content_length != -1 and current_offset < content_length:
                          raise Exception("Download incompleto (conexão encerrada)")
                     elif content_length == -1:
-                        # Para live streams, o fim do loop iter_content sem erro
-                        # geralmente significa que a conexão caiu.
-                        raise Exception("Stream de tamanho desconhecido interrompido - tentando reconectar")
+                        # Se for manifesto ou se recebemos dados antes de terminar, 
+                        # consideramos como fim legítimo do conteúdo ou stream contínuo.
+                        if is_manifest or (current_offset > 0 and not is_manifest):
+                            with self._cond:
+                                self._eof = True
+                                self._cond.notify_all()
+                            break
+                        else:
+                            raise Exception("Stream de tamanho desconhecido interrompido antes de receber dados")
                     else:
                         # EOF Legítimo (chegamos ao Content-Length)
                         with self._cond:

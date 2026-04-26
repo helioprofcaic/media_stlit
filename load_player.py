@@ -19,9 +19,13 @@ def main():
         # A função install_pyqt encerra o script, pedindo para o usuário rodar novamente.
         return
 
+    # Pega o caminho do executável do venv passado pelo .bat, ou usa o padrão se não for passado
+    venv_python_executable = sys.argv[1] if len(sys.argv) > 1 else sys.executable
+
     # Cria e executa a aplicação PyQt
     app = QApplication(sys.argv)
-    player = VideoPlayer()
+    # Passa o caminho do executável para o player
+    player = VideoPlayer(python_executable=venv_python_executable)
     player.show()
     sys.exit(app.exec())
 

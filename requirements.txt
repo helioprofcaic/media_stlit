@@ -4,3 +4,7 @@ requests
 google-api-python-client
 google-auth-httplib2
 google-auth-oauthlib
+m3u8
+cloudscraper
+beautifulsoup4
+chardet

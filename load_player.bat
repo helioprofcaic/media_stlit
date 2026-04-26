@@ -40,10 +40,11 @@ IF EXIST requirements.txt (
     pip install -r requirements.txt
 )
 
-REM --- Execução do Player ---
+REM Executa o Player
 echo.
 echo [LOADER] Iniciando o Player Desktop...
-python load_player.py
+REM Usa explicitamente o python do venv para evitar conflitos de ambiente
+".venv\Scripts\python.exe" load_player.py ".venv\Scripts\python.exe"
 
 REM --- Finalização ---
 echo.
