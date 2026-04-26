@@ -75,26 +75,29 @@ def handle_proxy_request():
         is_manifest = 'mpegurl' in content_type.lower() or target_url.endswith('.m3u8')
 
         if is_manifest:
-            # Para manifestos, precisamos ler, reescrever as URLs e servir o novo conteúdo
+            # Para manifestos, lemos, reescrevemos as URLs e servimos o novo conteúdo.
             manifest_content = resp.text
             
-            # A URL base do nosso proxy é a URL da página atual sem os query params
-            # O Streamlit não fornece isso diretamente, então usamos um truque com JS se necessário
-            # ou construímos a partir dos headers. Para a maioria dos ambientes, isso funciona:
             proxy_self_url = st.secrets.get("media_player_drive", {}).get("public_url", "").strip("/")
             if not proxy_self_url:
                  st.error("Proxy Error: `public_url` não configurado nos secrets.toml. O proxy HLS não funcionará.")
                  return
 
             rewritten_manifest = rewrite_manifest(manifest_content, target_url, proxy_self_url, headers_b64)
+            manifest_bytes = rewritten_manifest.encode('utf-8')
             
-            # Escreve o manifesto reescrito como a resposta
-            st.code(rewritten_manifest, language="text", line_numbers=False)
+            # Usa data URI para servir o conteúdo com o MIME type correto, contornando as limitações do Streamlit.
+            # O navegador interpretará isso como um arquivo de manifesto HLS.
+            b64_manifest = base64.b64encode(manifest_bytes).decode()
+            st.markdown(f'<a href="data:application/vnd.apple.mpegurl;base64,{b64_manifest}" download="playlist.m3u8"></a>', unsafe_allow_html=True)
+            st.stop() # Garante que nada mais seja renderizado
 
         else:
-            # Para segmentos de vídeo ou outros arquivos, apenas transmite os bytes
-            # st.write() é a forma do Streamlit de enviar "raw" para o navegador
-            st.write(resp.content)
+            # Para segmentos de vídeo (.ts), também usamos data URI para servir os bytes brutos.
+            segment_bytes = resp.content
+            b64_segment = base64.b64encode(segment_bytes).decode()
+            st.markdown(f'<a href="data:video/mp2t;base64,{b64_segment}" download="segment.ts"></a>', unsafe_allow_html=True)
+            st.stop() # Garante que nada mais seja renderizado
 
     except requests.exceptions.RequestException as e:
         st.error(f"Proxy Network Error for {target_url}: {e}")
