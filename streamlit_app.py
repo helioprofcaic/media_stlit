@@ -20,6 +20,7 @@ from core.utils import PLUGINS_REPO_DIR, ADDONS_DIR
 from modules.utils import remove_kodi_formatting
 from modules.drive_sync import sync_drive_plugins, sync_local_plugins
 from modules.navigation import navigate_to, go_back
+from core.proxy import ProxyServer
 from core.services import check_and_start_services
 
 st.set_page_config(page_title="Streamlit Media Player", layout="wide")
@@ -59,6 +60,11 @@ if 'adult_unlocked' not in st.session_state:
     st.session_state.adult_unlocked = False # Controle de acesso adulto
 if 'password_required' not in st.session_state:
     st.session_state.password_required = False # Flag para exibir diálogo de senha
+if 'proxy_server' not in st.session_state:
+    # Inicia o proxy local para streams HLS com headers
+    st.session_state.proxy_server = ProxyServer()
+    st.session_state.proxy_server.start()
+    print(f"Proxy server for Streamlit started on port {st.session_state.proxy_server.port}")
 if 'active_plugin_url' not in st.session_state:
     st.session_state.active_plugin_url = None # Armazena a URL original do plugin para playlist
 if 'local_sync_done' not in st.session_state:
@@ -486,6 +492,13 @@ if st.session_state.history:
                 headers_str = url.split('|')[1] if '|' in url else ""
                 
                 # --- Resolução de Redirects para HLS (.m3u8) ---
+                req_headers = {}
+                if headers_str:
+                    for h in headers_str.split('&'):
+                        if '=' in h:
+                            k, v = h.split('=', 1)
+                            req_headers[urllib.parse.unquote(k)] = urllib.parse.unquote(v)
+
                 # Resolve redirecionamentos (302) antes de passar para o player,
                 # para que o player use a URL final e estável para atualizar os segmentos.
                 is_hls = ".m3u8" in clean_url.split('?')[0]
@@ -495,13 +508,6 @@ if st.session_state.history:
                         import urllib3
                         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
                         
-                        req_headers = {}
-                        if headers_str:
-                            for h in headers_str.split('&'):
-                                if '=' in h:
-                                    k, v = h.split('=', 1)
-                                    req_headers[urllib.parse.unquote(k)] = urllib.parse.unquote(v)
-
                         # Segue até 5 redirecionamentos
                         temp_url = clean_url
                         for _ in range(5):
@@ -515,14 +521,20 @@ if st.session_state.history:
                         url = f"{clean_url}|{headers_str}" if headers_str else clean_url
                     except Exception as e:
                         print(f"Falha ao resolver redirect HLS: {e}")
-
-                final_url_for_player = clean_url
-                headers_for_player = headers_str
-
-                if headers_for_player:
+                
+                # --- Lógica de Proxy para HLS com Headers ---
+                # Se for HLS e tiver headers, usa o proxy local.
+                # O navegador não consegue enviar headers customizados para o <video>, mas pode se conectar a um proxy local.
+                if is_hls and req_headers:
+                    final_url_for_player = st.session_state.proxy_server.get_proxy_url(clean_url, req_headers)
+                    print(f"Web Player: Usando proxy para HLS com headers. URL final: {final_url_for_player}")
+                else:
+                    final_url_for_player = clean_url
+                
+                if req_headers:
                     with st.expander("⚠️ Informações de Proteção (Headers)", expanded=False):
                         st.warning("Este vídeo usa proteção por headers. Se não tocar, é porque o navegador bloqueia requisições customizadas.")
-                        st.code(headers_str)
+                        st.code(headers_str, language="text")
 
                 # --- Diagnóstico de Link (MixDrop e Status) ---
                 if not url.startswith("magnet:") and "youtube.com" not in url:
@@ -586,7 +598,7 @@ if st.session_state.history:
                 elif media_type == 'music':
                     st.audio(url, autoplay=True)
                 else:
-                    st.video(url, autoplay=True)
+                    st.video(final_url_for_player, autoplay=True)
                 
                 # --- Botões de Navegação da Playlist (Stream) ---
                 if st.session_state.get('current_playlist') and st.session_state.current_playlist_index != -1:
@@ -620,11 +632,11 @@ if st.session_state.history:
 
                 # 5. Link Externo
                 # Expande automaticamente se for um link problemático (MixDrop) ou tiver headers (que o navegador ignora)
-                auto_expand = "mixdrop" in final_url_for_player or "mxcontent" in final_url_for_player or bool(headers_for_player)
+                auto_expand = "mixdrop" in url or "mxcontent" in url or bool(req_headers)
                 
                 with st.expander("📺 Player Externo / Link Direto", expanded=auto_expand):
                     st.write("Se não tocar no navegador, copie o link abaixo e use no **VLC**, **MPV** ou **PotPlayer**.")
-                    if headers_for_player:
+                    if headers_str:
                         st.code(f'{final_url_for_player}|{headers_for_player}', language="text")
                     else:
                         st.code(final_url_for_player, language="text")
